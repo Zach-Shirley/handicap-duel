@@ -1,0 +1,604 @@
+import './style.css';
+import QRCode from 'qrcode';
+import { createMatch, rematch, step, type GameEvent, type GameState, type Vec } from './game';
+import { clampHandicap, HANDICAP_MAX, HANDICAP_STEP, speedPercent, speedsFor } from './handicap';
+import { bindKeyboard, readKeys, TouchStick } from './input';
+import { GuestLink, HostLink, normalizeCode, type HostMsg, type Snapshot } from './net';
+import { Renderer } from './render';
+import { isMuted, setMuted, sfx, unlockAudio } from './sound';
+
+const app = document.getElementById('app')!;
+app.innerHTML = `
+  <canvas id="game"></canvas>
+  <div id="overlay"></div>
+  <div id="corner">
+    <button id="btn-mute" title="Sound">🔊</button>
+    <button id="btn-full" title="Fullscreen">⛶</button>
+    <button id="btn-leave" title="Leave">✕</button>
+  </div>
+`;
+const canvas = document.getElementById('game') as HTMLCanvasElement;
+const overlay = document.getElementById('overlay')!;
+const corner = document.getElementById('corner')!;
+const renderer = new Renderer(canvas);
+const stick = new TouchStick(canvas);
+bindKeyboard();
+
+// ---------- persistence (browser-local only) ----------
+function load(key: string, fallback: string): string {
+  try {
+    return localStorage.getItem(key) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+function save(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* private mode etc. */
+  }
+}
+let myName = load('hd.name', '');
+let savedHandicap = clampHandicap(Number(load('hd.handicap', '0')) || 0);
+
+// ---------- app state ----------
+type Mode = 'menu' | 'hostLobby' | 'host' | 'guestWait' | 'guest' | 'practice';
+let mode: Mode = 'menu';
+let host: HostLink | null = null;
+let guest: GuestLink | null = null;
+let state: GameState | null = null;
+let names: [string, string] = ['Player 1', 'Player 2'];
+let guestInput: Vec = { x: 0, y: 0 };
+let guestInputAt = 0;
+let lastSend = 0;
+let pendingNetEvents: GameEvent[] = [];
+let lobbyStatus = '';
+
+// Guest-side snapshot buffer for smooth interpolation.
+let snaps: { at: number; s: Snapshot }[] = [];
+let guestHandicap = 0;
+let wakeLock: { release(): Promise<void> } | null = null;
+
+// ---------- helpers ----------
+function esc(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+}
+
+function show(html: string) {
+  overlay.innerHTML = html;
+  overlay.classList.toggle('hidden', html === '');
+}
+
+function nameOr(fallback: string): string {
+  const n = myName.trim().slice(0, 16);
+  return n || fallback;
+}
+
+function joinUrl(code: string): string {
+  return `${location.origin}${location.pathname}?join=${code}`;
+}
+
+async function keepAwake() {
+  try {
+    const nav = navigator as Navigator & { wakeLock?: { request(t: 'screen'): Promise<{ release(): Promise<void> }> } };
+    if (nav.wakeLock && !wakeLock) wakeLock = await nav.wakeLock.request('screen');
+  } catch {
+    /* not supported */
+  }
+}
+
+function releaseAwake() {
+  void wakeLock?.release().catch(() => {});
+  wakeLock = null;
+}
+
+function snapOf(s: GameState): Snapshot {
+  const r = (n: number) => Math.round(n * 10) / 10;
+  return {
+    phase: s.phase,
+    phaseTime: r(s.phaseTime),
+    timeLeft: r(s.timeLeft),
+    round: s.round,
+    players: s.players.map((p) => ({ x: r(p.x), y: r(p.y), score: p.score, speed: p.speed })),
+    coins: s.coins.map((c) => ({ id: c.id, x: r(c.x), y: r(c.y), value: c.value })),
+    roundWins: [...s.roundWins] as [number, number],
+    roundWinner: s.roundWinner,
+    handicap: s.handicap,
+    handicapBefore: s.handicapBefore,
+  };
+}
+
+function playSounds(events: GameEvent[], me: 0 | 1 | null) {
+  for (const e of events) {
+    switch (e.kind) {
+      case 'coin':
+        if (e.value > 1) sfx.bigCoin(me === null || e.who === me);
+        else sfx.coin(me === null || e.who === me);
+        break;
+      case 'bump':
+        sfx.bump();
+        break;
+      case 'beep':
+        sfx.beep();
+        break;
+      case 'go':
+        sfx.go();
+        break;
+      case 'sudden':
+        sfx.sudden();
+        break;
+      case 'round':
+      case 'match':
+        if (me === null || e.winner === me) sfx.win();
+        else sfx.lose();
+        break;
+    }
+  }
+}
+
+// ---------- screens ----------
+function menuScreen(prefillCode = '') {
+  mode = 'menu';
+  corner.classList.add('hidden');
+  const joining = prefillCode !== '';
+  show(`
+    <div class="panel">
+      <h1>Handicap <span>Duel</span></h1>
+      <p class="tag">Grab the most coins. The computer player gets slower every time they win.</p>
+      <label class="field">Your name
+        <input id="name" maxlength="16" placeholder="Your name" value="${esc(myName)}" autocomplete="off" />
+      </label>
+      ${
+        joining
+          ? `<div class="joinrow"><input id="code" maxlength="5" value="${esc(prefillCode)}" aria-label="Room code" /></div>
+             <button class="primary" id="go-join">Join game</button>
+             <button class="link" id="go-host">Host instead</button>`
+          : `<button class="primary" id="go-host">Host a game</button>
+             <div class="joinrow"><input id="code" maxlength="5" placeholder="CODE" aria-label="Room code" /><button id="go-join">Join</button></div>
+             <button class="link" id="go-practice">Practice on one keyboard</button>`
+      }
+      <p class="err" id="err"></p>
+    </div>`);
+  const nameEl = document.getElementById('name') as HTMLInputElement;
+  const codeEl = document.getElementById('code') as HTMLInputElement;
+  nameEl.addEventListener('input', () => {
+    myName = nameEl.value;
+    save('hd.name', myName);
+  });
+  codeEl.addEventListener('input', () => {
+    codeEl.value = normalizeCode(codeEl.value);
+  });
+  codeEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') document.getElementById('go-join')?.click();
+  });
+  document.getElementById('go-host')!.addEventListener('click', () => {
+    unlockAudio();
+    void startHosting();
+  });
+  document.getElementById('go-join')!.addEventListener('click', () => {
+    unlockAudio();
+    const code = normalizeCode(codeEl.value);
+    if (code.length !== 5) {
+      document.getElementById('err')!.textContent = 'Enter the 5-character code from the host screen.';
+      return;
+    }
+    void startJoining(code);
+  });
+  document.getElementById('go-practice')?.addEventListener('click', () => {
+    unlockAudio();
+    startPractice();
+  });
+  if (!joining) nameEl.focus();
+}
+
+async function startHosting() {
+  mode = 'hostLobby';
+  names = [nameOr('Player 1'), 'Player 2'];
+  lobbyStatus = 'Opening a room…';
+  show(`<div class="panel"><h2>Opening a room…</h2></div>`);
+  host = new HostLink({
+    onGuest(name) {
+      names[1] = name;
+      lobbyStatus = `${name} joined!`;
+      host?.send({ t: 'welcome', hostName: names[0], guestName: name });
+      sendLobby();
+      if (mode === 'hostLobby') renderLobby();
+    },
+    onGuestLeft() {
+      guestInput = { x: 0, y: 0 };
+      lobbyStatus = `${names[1]} disconnected. They can rejoin with the same code.`;
+      names[1] = 'Player 2';
+      if (mode === 'host') {
+        state = null;
+        mode = 'hostLobby';
+      }
+      if (mode === 'hostLobby') renderLobby();
+    },
+    onInput(x, y) {
+      guestInput = { x, y };
+      guestInputAt = performance.now();
+    },
+    onStatus(text) {
+      lobbyStatus = text;
+      if (mode === 'hostLobby') renderLobby();
+    },
+  });
+  try {
+    await host.open();
+  } catch (err) {
+    host.destroy();
+    host = null;
+    show(`<div class="panel"><h2>Couldn't open a room</h2><p class="err">${esc((err as Error).message)}</p><button class="primary" id="back">Back</button></div>`);
+    document.getElementById('back')!.addEventListener('click', () => menuScreen());
+    return;
+  }
+  lobbyStatus = 'Waiting for player 2 to join…';
+  renderLobby();
+}
+
+function sendLobby() {
+  host?.send({ t: 'lobby', hostName: names[0], guestName: names[1], handicap: savedHandicap });
+}
+
+function speedLine(h: number, n: [string, string]): string {
+  const [a, b] = speedsFor(h);
+  return `<span style="color:var(--p1)">${esc(n[0])} ${speedPercent(a)}%</span> · <span style="color:var(--p2)">${esc(n[1])} ${speedPercent(b)}%</span>`;
+}
+
+function renderLobby() {
+  if (!host) return;
+  corner.classList.remove('hidden');
+  const url = joinUrl(host.code);
+  const ready = host.connected;
+  show(`
+    <div class="panel wide">
+      <div class="lobby">
+        <div class="qrbox">
+          <canvas id="qr"></canvas>
+          <p class="hint">Scan with the phone camera</p>
+        </div>
+        <div class="lobbyinfo">
+          <p class="label">Room code</p>
+          <p class="code">${host.code}</p>
+          <p class="hint url">${esc(url)}</p>
+          <p class="status ${ready ? 'ok' : ''}">${esc(lobbyStatus)}</p>
+          <div class="hcap">
+            <p class="label">Starting speeds</p>
+            <p>${speedLine(savedHandicap, names)}</p>
+            <div class="hbtns">
+              <button id="h-me" title="Slow ${esc(names[0])} down">Slow ${esc(names[0])}</button>
+              <button id="h-reset">Even</button>
+              <button id="h-them" title="Slow ${esc(names[1])} down">Slow ${esc(names[1])}</button>
+            </div>
+            <p class="hint">The computer player gets slowed by winning. Speeds carry over between matches on this computer.</p>
+          </div>
+          <button class="primary" id="start" ${ready ? '' : 'disabled'}>${ready ? 'Start match' : 'Waiting for player 2…'}</button>
+          <p class="hint">You: WASD or arrow keys. Phone: drag a thumb anywhere.</p>
+        </div>
+      </div>
+    </div>`);
+  void QRCode.toCanvas(document.getElementById('qr') as HTMLCanvasElement, url, {
+    width: 200,
+    margin: 1,
+    color: { dark: '#07070d', light: '#ffffff' },
+  });
+  const adjust = (d: number) => {
+    savedHandicap = clampHandicap(savedHandicap + d);
+    save('hd.handicap', String(savedHandicap));
+    sendLobby();
+    renderLobby();
+  };
+  document.getElementById('h-me')!.addEventListener('click', () => adjust(HANDICAP_STEP));
+  document.getElementById('h-them')!.addEventListener('click', () => adjust(-HANDICAP_STEP));
+  document.getElementById('h-reset')!.addEventListener('click', () => adjust(-savedHandicap));
+  (document.getElementById('h-me') as HTMLButtonElement).disabled = savedHandicap >= HANDICAP_MAX;
+  (document.getElementById('h-them') as HTMLButtonElement).disabled = savedHandicap <= -HANDICAP_MAX;
+  document.getElementById('start')!.addEventListener('click', () => {
+    if (!host?.connected) return;
+    unlockAudio();
+    state = createMatch(savedHandicap);
+    pendingNetEvents = [];
+    mode = 'host';
+    show('');
+    void keepAwake();
+  });
+}
+
+function matchOverPanel(isHost: boolean) {
+  if (isHost) {
+    show(`
+      <div class="panel bottom">
+        <button class="primary" id="again">Rematch</button>
+        <button id="lobby">Lobby</button>
+      </div>`);
+    document.getElementById('again')!.addEventListener('click', () => {
+      if (!state) return;
+      rematch(state);
+      show('');
+    });
+    document.getElementById('lobby')!.addEventListener('click', () => {
+      state = null;
+      mode = 'hostLobby';
+      host?.send({ t: 'toLobby' });
+      sendLobby();
+      lobbyStatus = host?.connected ? `${names[1]} is here.` : 'Waiting for player 2 to join…';
+      renderLobby();
+    });
+  } else {
+    show(`<div class="panel bottom"><p>Waiting for ${esc(names[0])} to start a rematch…</p></div>`);
+  }
+}
+
+async function startJoining(code: string) {
+  mode = 'guestWait';
+  const name = nameOr('Player 2');
+  names = ['Host', name];
+  show(`<div class="panel"><h2>Joining ${code}…</h2></div>`);
+  guest = new GuestLink({
+    onMsg: onHostMsg,
+    onClosed(reason) {
+      releaseAwake();
+      guest?.destroy();
+      guest = null;
+      snaps = [];
+      mode = 'guestWait';
+      show(`<div class="panel"><h2>Disconnected</h2><p class="err">${esc(reason)}</p>
+        <button class="primary" id="retry">Rejoin ${code}</button><button class="link" id="back">Back</button></div>`);
+      document.getElementById('retry')!.addEventListener('click', () => void startJoining(code));
+      document.getElementById('back')!.addEventListener('click', () => menuScreen());
+    },
+  });
+  try {
+    await guest.join(code, name);
+  } catch (err) {
+    guest?.destroy();
+    guest = null;
+    show(`<div class="panel"><h2>Couldn't join</h2><p class="err">${esc((err as Error).message)}</p>
+      <button class="primary" id="retry">Try again</button><button class="link" id="back">Back</button></div>`);
+    document.getElementById('retry')!.addEventListener('click', () => void startJoining(code));
+    document.getElementById('back')!.addEventListener('click', () => menuScreen(code));
+    return;
+  }
+  corner.classList.remove('hidden');
+  guestWaitScreen('Connected! Waiting for the host to start…');
+}
+
+function guestWaitScreen(text: string) {
+  mode = 'guestWait';
+  const portrait = window.innerHeight > window.innerWidth;
+  show(`
+    <div class="panel">
+      <h2>${esc(text)}</h2>
+      <p>${speedLine(guestHandicap, names)}</p>
+      <p class="hint">Drag your thumb anywhere on the screen to move.</p>
+      ${portrait ? '<p class="warn">Turn your phone sideways for a bigger arena.</p>' : ''}
+      <button id="fs">Go fullscreen</button>
+    </div>`);
+  document.getElementById('fs')!.addEventListener('click', () => void goFullscreen());
+}
+
+function onHostMsg(m: HostMsg) {
+  switch (m.t) {
+    case 'welcome':
+    case 'lobby':
+      names = [m.hostName, m.guestName];
+      if (m.t === 'lobby') guestHandicap = m.handicap;
+      if (mode === 'guestWait') guestWaitScreen('Connected! Waiting for the host to start…');
+      break;
+    case 'toLobby':
+      snaps = [];
+      releaseAwake();
+      guestWaitScreen(`Back in the lobby. Waiting for ${names[0]}…`);
+      break;
+    case 'full':
+      show(`<div class="panel"><h2>That game is full</h2><button class="primary" id="back">Back</button></div>`);
+      document.getElementById('back')!.addEventListener('click', () => menuScreen());
+      guest?.destroy();
+      guest = null;
+      break;
+    case 'state': {
+      const now = performance.now();
+      snaps.push({ at: now, s: m.s });
+      if (snaps.length > 6) snaps.shift();
+      renderer.effects(m.ev);
+      playSounds(m.ev, 1);
+      if (mode !== 'guest') {
+        mode = 'guest';
+        show('');
+        void keepAwake();
+      }
+      const over = m.s.phase === 'matchOver';
+      const showing = overlay.querySelector('.bottom') !== null;
+      if (over && !showing) matchOverPanel(false);
+      else if (!over && showing) show('');
+      break;
+    }
+  }
+}
+
+function startPractice() {
+  mode = 'practice';
+  names = ['WASD', 'Arrows'];
+  state = createMatch(0);
+  corner.classList.remove('hidden');
+  show('');
+}
+
+async function goFullscreen() {
+  try {
+    if (!document.fullscreenElement) {
+      await document.documentElement.requestFullscreen();
+      const o = screen.orientation as ScreenOrientation & { lock?: (o: string) => Promise<void> };
+      await o.lock?.('landscape').catch(() => {});
+    } else {
+      await document.exitFullscreen();
+    }
+  } catch {
+    /* iOS Safari has no fullscreen for pages */
+  }
+}
+
+function leave() {
+  releaseAwake();
+  host?.destroy();
+  host = null;
+  guest?.destroy();
+  guest = null;
+  state = null;
+  snaps = [];
+  history.replaceState(null, '', location.pathname);
+  menuScreen();
+}
+
+// ---------- corner buttons ----------
+const muteBtn = document.getElementById('btn-mute')!;
+muteBtn.addEventListener('click', () => {
+  setMuted(!isMuted());
+  muteBtn.textContent = isMuted() ? '🔇' : '🔊';
+});
+document.getElementById('btn-full')!.addEventListener('click', () => void goFullscreen());
+document.getElementById('btn-leave')!.addEventListener('click', () => {
+  if (confirm('Leave this game?')) leave();
+});
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && mode === 'practice') leave();
+});
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// ---------- main loop ----------
+const FIXED = 1 / 120;
+let acc = 0;
+let last = performance.now();
+
+function guestView(now: number): Snapshot | null {
+  if (snaps.length === 0) return null;
+  const latest = snaps[snaps.length - 1].s;
+  const renderAt = now - 50;
+  for (let i = snaps.length - 1; i > 0; i--) {
+    const a = snaps[i - 1];
+    const b = snaps[i];
+    if (a.at <= renderAt && renderAt <= b.at) {
+      const k = (renderAt - a.at) / Math.max(1, b.at - a.at);
+      return {
+        ...latest,
+        players: b.s.players.map((p, j) => ({
+          ...p,
+          x: a.s.players[j].x + (p.x - a.s.players[j].x) * k,
+          y: a.s.players[j].y + (p.y - a.s.players[j].y) * k,
+        })),
+      };
+    }
+  }
+  return latest;
+}
+
+function tick(now: number) {
+  const dt = Math.max(0, Math.min(0.1, (now - last) / 1000));
+  last = now;
+
+  if ((mode === 'host' || mode === 'practice') && state) {
+    const prevPhase = state.phase;
+    acc += dt;
+    while (acc >= FIXED) {
+      const stale = now - guestInputAt > 500;
+      const inputs: [Vec, Vec] =
+        mode === 'practice'
+          ? [readKeys('wasd'), readKeys('arrows')]
+          : [readKeys('both'), stale ? { x: 0, y: 0 } : guestInput];
+      step(state, inputs, FIXED);
+      acc -= FIXED;
+    }
+    const events = state.events;
+    state.events = [];
+    if (events.length) {
+      renderer.effects(events);
+      playSounds(events, mode === 'host' ? 0 : null);
+      pendingNetEvents.push(...events);
+      if (mode === 'host' && events.some((e) => e.kind === 'round' || e.kind === 'match')) {
+        savedHandicap = state.handicap;
+        save('hd.handicap', String(savedHandicap));
+      }
+    }
+    if (mode === 'host' && host && now - lastSend >= 33) {
+      host.send({ t: 'state', s: snapOf(state), ev: pendingNetEvents });
+      pendingNetEvents = [];
+      lastSend = now;
+    }
+    if (state.phase === 'matchOver' && prevPhase !== 'matchOver') {
+      if (mode === 'host') matchOverPanel(true);
+      else practiceOver();
+    }
+    renderer.draw({ snap: snapOf(state), names, me: mode === 'host' ? 0 : null }, dt);
+  } else if (mode === 'guest') {
+    if (now - lastSend >= 33) {
+      const kb = readKeys('both');
+      const v = stick.active ? stick.read() : kb;
+      guest?.sendInput(v.x, v.y);
+      lastSend = now;
+    }
+    const view = guestView(now);
+    if (view) renderer.draw({ snap: view, names, me: 1, stick }, dt);
+  } else {
+    acc = 0;
+    renderer.draw({ snap: idleSnap(now), names: ['', ''], me: null, idle: true }, dt);
+  }
+}
+
+function frame(now: number) {
+  tick(now);
+  requestAnimationFrame(frame);
+}
+
+function practiceOver() {
+  show(`<div class="panel bottom"><button class="primary" id="again">Play again</button><button id="menu">Menu</button></div>`);
+  document.getElementById('again')!.addEventListener('click', () => {
+    if (state) rematch(state);
+    show('');
+  });
+  document.getElementById('menu')!.addEventListener('click', leave);
+}
+
+/** Attract-mode backdrop behind menus: two dots drifting around coins. */
+function idleSnap(now: number): Snapshot {
+  const t = now / 1000;
+  return {
+    phase: 'playing',
+    phaseTime: 0,
+    timeLeft: 30,
+    round: 1,
+    players: [
+      { x: 500 + Math.cos(t * 0.7) * 320, y: 312 + Math.sin(t * 1.1) * 180, score: 0, speed: 1 },
+      { x: 500 + Math.cos(t * 0.9 + 2) * 300, y: 312 + Math.sin(t * 0.8 + 1) * 200, score: 0, speed: 1 },
+    ],
+    coins: [
+      { id: 1, x: 300, y: 200, value: 1 },
+      { id: 2, x: 700, y: 420, value: 1 },
+      { id: 3, x: 520, y: 140, value: 3 },
+    ],
+    roundWins: [0, 0],
+    roundWinner: null,
+    handicap: 0,
+    handicapBefore: 0,
+  };
+}
+
+const params = new URLSearchParams(location.search);
+menuScreen(normalizeCode(params.get('join') ?? ''));
+requestAnimationFrame(frame);
+
+if (import.meta.env.DEV) {
+  // Test hook: drive frames manually when the tab is hidden (rAF paused).
+  let virt = 0;
+  (window as unknown as Record<string, unknown>).__hd = {
+    run(ms: number) {
+      virt = Math.max(virt, performance.now());
+      last = virt;
+      for (let t = 16; t <= ms; t += 16) tick((virt += 16));
+    },
+    state: () => state,
+    snaps: () => snaps.length,
+    mode: () => mode,
+    stick: () => stick.read(),
+  };
+}
