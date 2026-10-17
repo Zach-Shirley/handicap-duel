@@ -32,15 +32,19 @@ export const METEOR_GAP_STORM = 0.12;
 /** Hits are judged against 80% of the player's radius: grazes don't count. */
 export const HIT_FORGIVENESS = 0.8;
 
-export type Mode = 'coins' | 'paint' | 'meteor';
-export const MODES: Mode[] = ['coins', 'paint', 'meteor'];
-export const MODE_INFO: Record<Mode, { name: string; blurb: string; effect: Effect; sudden: string; suddenSub: string }> = {
+export type Mode = 'coins' | 'paint' | 'meteor' | 'ttt';
+export const MODES: Mode[] = ['coins', 'paint', 'meteor', 'ttt'];
+export const MODE_INFO: Record<
+  Mode,
+  { name: string; blurb: string; effect: Effect; sudden: string; suddenSub: string; wins: number }
+> = {
   coins: {
     name: 'Coin Rush',
     blurb: 'Grab the most coins in 30 seconds',
     effect: 'speed',
     sudden: 'SUDDEN DEATH',
     suddenSub: 'next coin wins',
+    wins: WINS_TO_MATCH,
   },
   paint: {
     name: 'Paint the Floor',
@@ -48,6 +52,7 @@ export const MODE_INFO: Record<Mode, { name: string; blurb: string; effect: Effe
     effect: 'speed',
     sudden: 'SUDDEN DEATH',
     suddenSub: 'next tile wins',
+    wins: WINS_TO_MATCH,
   },
   meteor: {
     name: 'Meteor Dodge',
@@ -55,8 +60,49 @@ export const MODE_INFO: Record<Mode, { name: string; blurb: string; effect: Effe
     effect: 'size',
     sudden: 'METEOR STORM',
     suddenSub: 'last one standing',
+    wins: WINS_TO_MATCH,
+  },
+  ttt: {
+    name: 'Mega Tic-Tac-Toe',
+    blurb: 'Nine boards in one. Your move picks their next board',
+    effect: 'none',
+    sudden: '',
+    suddenSub: '',
+    wins: 2,
   },
 };
+
+/** Three-in-a-row index triples on a 3x3 grid. */
+export const LINES = [
+  [0, 1, 2],
+  [3, 4, 5],
+  [6, 7, 8],
+  [0, 3, 6],
+  [1, 4, 7],
+  [2, 5, 8],
+  [0, 4, 8],
+  [2, 4, 6],
+];
+
+/**
+ * Ultimate tic-tac-toe. Cell index = board * 9 + cell. Board states:
+ * 0 open, 1 host won, 2 guest won, 3 full with no winner.
+ */
+export interface Ttt {
+  cells: Uint8Array;
+  boards: Uint8Array;
+  /** Board the player to move must use, or -1 for any open board. */
+  next: number;
+  turn: Side;
+  /** Last cell played (for highlighting), or -1. */
+  last: number;
+  /** Winning line across the big board, if any. */
+  line: number[] | null;
+}
+
+function newTtt(starter: Side): Ttt {
+  return { cells: new Uint8Array(81), boards: new Uint8Array(9), next: -1, turn: starter, last: -1, line: null };
+}
 
 export type Rng = () => number;
 export type Phase = 'countdown' | 'playing' | 'sudden' | 'roundOver' | 'matchOver';
@@ -104,7 +150,10 @@ export type GameEvent =
   | { kind: 'go' }
   | { kind: 'sudden' }
   | { kind: 'round'; winner: Side }
-  | { kind: 'match'; winner: Side };
+  | { kind: 'match'; winner: Side }
+  | { kind: 'place'; who: Side }
+  | { kind: 'boardWon'; who: Side; board: number }
+  | { kind: 'draw' };
 
 export interface GameState {
   mode: Mode;
@@ -122,6 +171,7 @@ export interface GameState {
   /** Paint ownership per cell: 0 empty, 1 host, 2 guest. */
   grid: Uint8Array;
   meteors: Meteor[];
+  ttt: Ttt;
   roundWins: [number, number];
   roundWinner: Side | null;
   handicap: Handicaps;
@@ -147,6 +197,7 @@ export function createMatch(handicap: Handicaps, mode: Mode = 'coins', rng: Rng 
     bumpCooldown: 0,
     grid: new Uint8Array(GRID_N),
     meteors: [],
+    ttt: newTtt(1),
     roundWins: [0, 0],
     roundWinner: null,
     handicap: cloneHc(handicap),
@@ -175,6 +226,13 @@ export function startRound(state: GameState, rng: Rng = Math.random): void {
   state.roundWinner = null;
   state.spawnTimer = 0;
   state.bumpCooldown = 0;
+  if (state.mode === 'ttt') {
+    // Guest moves first in round 1, then the first move alternates. No countdown.
+    state.ttt = newTtt(state.round % 2 === 1 ? 1 : 0);
+    state.phase = 'playing';
+    state.phaseTime = 0;
+    state.events.push({ kind: 'go' });
+  }
   if (state.mode === 'coins') {
     // Opening coins: one fair coin on the center line, plus one random.
     state.coins.push({ id: state.nextId++, x: ARENA.w / 2, y: ARENA.h / 2, value: 1 });
@@ -402,12 +460,73 @@ function updateMeteors(state: GameState, dt: number, rng: Rng): void {
   }
 }
 
+function lineOwner(get: (i: number) => number): { owner: number; line: number[] } | null {
+  for (const line of LINES) {
+    const a = get(line[0]);
+    if ((a === 1 || a === 2) && a === get(line[1]) && a === get(line[2])) return { owner: a, line };
+  }
+  return null;
+}
+
+export function isLegalMove(t: Ttt, board: number, cell: number): boolean {
+  if (board < 0 || board > 8 || cell < 0 || cell > 8) return false;
+  if (t.boards[board] !== 0) return false;
+  if (t.next !== -1 && t.next !== board) return false;
+  return t.cells[board * 9 + cell] === 0;
+}
+
+/** Play a tic-tac-toe move. Returns false (and changes nothing) if illegal. */
+export function playMove(state: GameState, who: Side, board: number, cell: number): boolean {
+  const t = state.ttt;
+  if (state.mode !== 'ttt' || state.phase !== 'playing' || t.turn !== who) return false;
+  if (!isLegalMove(t, board, cell)) return false;
+  const mark = who + 1;
+  const base = board * 9;
+  t.cells[base + cell] = mark;
+  t.last = base + cell;
+  state.events.push({ kind: 'place', who });
+
+  if (lineOwner((i) => t.cells[base + i])) {
+    t.boards[board] = mark;
+    state.events.push({ kind: 'boardWon', who, board });
+  } else if (t.cells.subarray(base, base + 9).every((v) => v !== 0)) {
+    t.boards[board] = 3;
+  }
+  state.players[0].score = t.boards.filter((b) => b === 1).length;
+  state.players[1].score = t.boards.filter((b) => b === 2).length;
+
+  const meta = lineOwner((i) => t.boards[i]);
+  if (meta) {
+    t.line = meta.line;
+    endRound(state, (meta.owner - 1) as Side);
+    return true;
+  }
+  if (t.boards.every((b) => b !== 0)) {
+    // Big board full with no line: most small boards wins, else replay.
+    const [a, b] = [state.players[0].score, state.players[1].score];
+    if (a !== b) endRound(state, a > b ? 0 : 1);
+    else drawRound(state);
+    return true;
+  }
+  t.next = t.boards[cell] === 0 ? cell : -1;
+  t.turn = who === 0 ? 1 : 0;
+  return true;
+}
+
+function drawRound(state: GameState): void {
+  state.roundWinner = null;
+  state.handicapBefore = cloneHc(state.handicap);
+  state.phase = 'roundOver';
+  state.phaseTime = ROUND_OVER_TIME;
+  state.events.push({ kind: 'draw' });
+}
+
 function endRound(state: GameState, winner: Side): void {
   state.roundWinner = winner;
   state.roundWins[winner] += 1;
   state.handicapBefore = cloneHc(state.handicap);
   state.handicap = applyRoundResult(state.handicap, winner, MODE_INFO[state.mode].effect);
-  if (state.roundWins[winner] >= WINS_TO_MATCH) {
+  if (state.roundWins[winner] >= MODE_INFO[state.mode].wins) {
     state.phase = 'matchOver';
     state.phaseTime = 0;
     state.events.push({ kind: 'match', winner });
@@ -444,6 +563,8 @@ export function step(state: GameState, inputs: [Vec, Vec], dt: number, rng: Rng 
     case 'sudden':
       break;
   }
+  // Tic-tac-toe only changes through playMove().
+  if (state.mode === 'ttt') return;
 
   state.bumpCooldown = Math.max(0, state.bumpCooldown - dt);
   movePlayer(state.players[0], inputs[0], dt);

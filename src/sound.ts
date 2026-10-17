@@ -59,6 +59,9 @@ export const sfx = {
     tone(220, 0.5, 'sawtooth', 0.12, 0, 50);
     tone(90, 0.6, 'sine', 0.25, 0.05, 30);
   },
+  place() {
+    tone(520, 0.06, 'triangle', 0.12);
+  },
   beep() {
     tone(600, 0.12, 'sine', 0.12);
   },

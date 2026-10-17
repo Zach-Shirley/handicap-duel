@@ -1,4 +1,4 @@
-import { ARENA, BIG_COIN_R, BLAST_R, CELL, COIN_R, GRID_N, GRID_W, METEOR_WARN, MODE_INFO, WINS_TO_MATCH, type GameEvent } from './game';
+import { ARENA, BIG_COIN_R, BLAST_R, CELL, COIN_R, GRID_N, GRID_W, METEOR_WARN, MODE_INFO, type GameEvent } from './game';
 import { describeChange, pct } from './handicap';
 import type { Snapshot } from './net';
 import type { TouchStick } from './input';
@@ -41,11 +41,23 @@ export interface View {
   stick?: TouchStick | null;
   /** Menu backdrop: arena only, no scoreboard or banners. */
   idle?: boolean;
+  /** Tic-tac-toe: this screen may place a mark right now (enables hover). */
+  canPlay?: boolean;
+}
+
+interface BoardRect {
+  x: number;
+  y: number;
+  side: number;
+  gap: number;
+  sb: number;
 }
 
 export class Renderer {
   private ctx: CanvasRenderingContext2D;
   private particles: Particle[] = [];
+  /** Particles positioned in screen pixels (tic-tac-toe board effects). */
+  private screenParticles: Particle[] = [];
   private texts: FloatText[] = [];
   private rings: Ring[] = [];
   private shake = 0;
@@ -54,6 +66,9 @@ export class Renderer {
   private oy = 0;
   private dpr = 1;
   private t = 0;
+  private board: BoardRect | null = null;
+  /** Last mouse position in CSS pixels, for tic-tac-toe hover. */
+  pointer: { x: number; y: number } | null = null;
 
   constructor(private canvas: HTMLCanvasElement) {
     this.ctx = canvas.getContext('2d')!;
@@ -131,6 +146,24 @@ export class Renderer {
           });
         }
         this.shake = 16;
+      } else if (e.kind === 'boardWon' && this.board) {
+        const b = this.board;
+        const cx = b.x + (e.board % 3) * (b.sb + b.gap) + b.sb / 2;
+        const cy = b.y + Math.floor(e.board / 3) * (b.sb + b.gap) + b.sb / 2;
+        for (let i = 0; i < 30; i++) {
+          const a = Math.random() * Math.PI * 2;
+          const sp = 60 + Math.random() * 220;
+          this.screenParticles.push({
+            x: cx,
+            y: cy,
+            vx: Math.cos(a) * sp,
+            vy: Math.sin(a) * sp,
+            life: 0.7,
+            max: 0.7,
+            color: i % 2 ? COLORS[e.who] : '#ffd34d',
+            size: 3 + Math.random() * 3,
+          });
+        }
       } else if (e.kind === 'bump') {
         this.rings.push({ x: e.x, y: e.y, life: 0.35 });
         this.shake = Math.min(14, 4 + e.force / 60);
@@ -157,6 +190,16 @@ export class Renderer {
     ctx.setTransform(this.dpr * this.scale, 0, 0, this.dpr * this.scale, this.dpr * (this.ox + sx), this.dpr * (this.oy + sy));
 
     if (!view.idle) this.drawHud(view);
+    if (view.snap.mode === 'ttt' && !view.idle) {
+      this.drawTtt(view, W, H, dt);
+      ctx.setTransform(this.dpr * this.scale, 0, 0, this.dpr * this.scale, this.dpr * this.ox, this.dpr * this.oy);
+      ctx.save();
+      ctx.translate(0, HUD_H);
+      this.drawBanner(view);
+      ctx.restore();
+      return;
+    }
+    this.board = null;
     ctx.save();
     ctx.translate(0, HUD_H);
     this.drawArena();
@@ -205,6 +248,157 @@ export class Renderer {
     roundRect(ctx, 0, 0, ARENA.w, ARENA.h, 22);
     ctx.stroke();
     ctx.shadowBlur = 0;
+  }
+
+  /** Map a screen point to a tic-tac-toe (board, cell), or null. */
+  hitTtt(clientX: number, clientY: number): { board: number; cell: number } | null {
+    const b = this.board;
+    if (!b) return null;
+    for (let board = 0; board < 9; board++) {
+      const bx = b.x + (board % 3) * (b.sb + b.gap);
+      const by = b.y + Math.floor(board / 3) * (b.sb + b.gap);
+      if (clientX < bx || clientY < by || clientX >= bx + b.sb || clientY >= by + b.sb) continue;
+      const cs = b.sb / 3;
+      const cell = Math.floor((clientY - by) / cs) * 3 + Math.floor((clientX - bx) / cs);
+      return { board, cell: Math.max(0, Math.min(8, cell)) };
+    }
+    return null;
+  }
+
+  /**
+   * Tic-tac-toe is laid out in screen space, not the arena, so the board can
+   * fill a phone screen in either orientation.
+   */
+  private drawTtt(view: View, W: number, H: number, dt: number) {
+    const t = view.snap.ttt;
+    if (!t) return;
+    const { ctx } = this;
+    const pad = Math.min(W, H) < 500 ? 8 : 20;
+    const top = this.oy + HUD_H * this.scale + 6;
+    const lane = H > W ? 0 : 104;
+    const side = Math.max(120, Math.min(W - pad * 2 - lane, H - top - pad));
+    const gap = side * 0.035;
+    const sb = (side - gap * 2) / 3;
+    const cs = sb / 3;
+    const x0 = (W - side) / 2;
+    const y0 = top + Math.max(0, (H - top - pad - side) / 2);
+    this.board = { x: x0, y: y0, side, gap, sb };
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+
+    const playing = view.snap.phase === 'playing';
+    const turnColor = COLORS[t.turn];
+    const hover = view.canPlay && this.pointer ? this.hitTtt(this.pointer.x, this.pointer.y) : null;
+    const legal = (b: number, c: number) =>
+      playing && t.boards[b] === '0' && (t.next === -1 || t.next === b) && t.cells[b * 9 + c] === '0';
+
+    for (let b = 0; b < 9; b++) {
+      const bx = x0 + (b % 3) * (sb + gap);
+      const by = y0 + Math.floor(b / 3) * (sb + gap);
+      const open = t.boards[b] === '0';
+      const active = playing && open && (t.next === -1 || t.next === b);
+      ctx.fillStyle = active ? hexA(turnColor, 0.13) : 'rgba(255,255,255,0.035)';
+      roundRect(ctx, bx, by, sb, sb, sb * 0.08);
+      ctx.fill();
+      if (active) {
+        ctx.strokeStyle = hexA(turnColor, 0.4 + 0.25 * Math.sin(this.t * 4));
+        ctx.lineWidth = 3;
+        ctx.shadowColor = turnColor;
+        ctx.shadowBlur = 14;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      }
+      // Inner grid
+      ctx.strokeStyle = 'rgba(232,230,255,0.22)';
+      ctx.lineWidth = Math.max(1.5, cs * 0.04);
+      ctx.lineCap = 'round';
+      for (let k = 1; k < 3; k++) {
+        ctx.beginPath();
+        ctx.moveTo(bx + k * cs, by + cs * 0.15);
+        ctx.lineTo(bx + k * cs, by + sb - cs * 0.15);
+        ctx.moveTo(bx + cs * 0.15, by + k * cs);
+        ctx.lineTo(bx + sb - cs * 0.15, by + k * cs);
+        ctx.stroke();
+      }
+      for (let c = 0; c < 9; c++) {
+        const cx = bx + (c % 3) * cs + cs / 2;
+        const cy = by + Math.floor(c / 3) * cs + cs / 2;
+        const v = t.cells[b * 9 + c];
+        if (v === '1' || v === '2') {
+          this.drawMark(Number(v) - 1, cx, cy, cs * 0.3, open ? 1 : 0.35);
+          if (t.last === b * 9 + c) {
+            ctx.strokeStyle = 'rgba(255,211,77,0.9)';
+            ctx.lineWidth = 2;
+            roundRect(ctx, cx - cs * 0.44, cy - cs * 0.44, cs * 0.88, cs * 0.88, cs * 0.15);
+            ctx.stroke();
+          }
+        } else if (hover && hover.board === b && hover.cell === c && legal(b, c)) {
+          this.drawMark(t.turn, cx, cy, cs * 0.3, 0.35);
+        }
+      }
+      // Won or full boards get a big overlay mark.
+      const st = t.boards[b];
+      if (st === '1' || st === '2') {
+        ctx.fillStyle = 'rgba(7,7,13,0.45)';
+        roundRect(ctx, bx, by, sb, sb, sb * 0.08);
+        ctx.fill();
+        this.drawMark(Number(st) - 1, bx + sb / 2, by + sb / 2, sb * 0.32, 0.95, sb * 0.09);
+      } else if (st === '3') {
+        ctx.fillStyle = 'rgba(7,7,13,0.55)';
+        roundRect(ctx, bx, by, sb, sb, sb * 0.08);
+        ctx.fill();
+      }
+    }
+    if (t.line) {
+      const center = (b: number) => ({
+        x: x0 + (b % 3) * (sb + gap) + sb / 2,
+        y: y0 + Math.floor(b / 3) * (sb + gap) + sb / 2,
+      });
+      const a = center(t.line[0]);
+      const z = center(t.line[2]);
+      const owner = t.boards[t.line[0]] === '1' ? 0 : 1;
+      ctx.strokeStyle = '#fff';
+      ctx.shadowColor = COLORS[owner];
+      ctx.shadowBlur = 24;
+      ctx.lineWidth = sb * 0.07;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(z.x, z.y);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+    this.screenParticles = this.screenParticles.filter((p) => (p.life -= dt) > 0);
+    for (const p of this.screenParticles) {
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      ctx.globalAlpha = p.life / p.max;
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /** X for the host (red), O for the guest (blue). */
+  private drawMark(who: number, x: number, y: number, r: number, alpha: number, width = Math.max(3, r * 0.32)) {
+    const { ctx } = this;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = COLORS[who];
+    ctx.shadowColor = COLORS[who];
+    ctx.shadowBlur = 10;
+    ctx.lineWidth = width;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    if (who === 0) {
+      ctx.moveTo(x - r, y - r);
+      ctx.lineTo(x + r, y + r);
+      ctx.moveTo(x + r, y - r);
+      ctx.lineTo(x - r, y + r);
+    } else {
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+    }
+    ctx.stroke();
+    ctx.restore();
   }
 
   private drawGrid(grid: string) {
@@ -420,12 +614,15 @@ export class Renderer {
       const sz = s.handicap.size[i];
       const effect = MODE_INFO[mode].effect;
       const stats: string[] = [];
-      if (effect === 'speed' || sp !== 1) stats.push(`speed ${pct(sp)}%`);
-      if (effect === 'size' || sz !== 1) stats.push(`size ${pct(sz)}%`);
-      ctx.fillStyle = sp < 1 || sz > 1 ? '#ffd34d' : 'rgba(232,230,255,0.55)';
+      if (effect === 'none') stats.push(i === 0 ? 'plays X · boards won' : 'plays O · boards won');
+      else {
+        if (effect === 'speed' || sp !== 1) stats.push(`speed ${pct(sp)}%`);
+        if (effect === 'size' || sz !== 1) stats.push(`size ${pct(sz)}%`);
+      }
+      ctx.fillStyle = effect !== 'none' && (sp < 1 || sz > 1) ? '#ffd34d' : 'rgba(232,230,255,0.55)';
       ctx.fillText(stats.join(' · '), nx, 40);
       // Round-win pips
-      for (let k = 0; k < WINS_TO_MATCH; k++) {
+      for (let k = 0; k < MODE_INFO[mode].wins; k++) {
         const px = left ? 14 + k * 20 : WORLD_W - 14 - k * 20;
         ctx.beginPath();
         ctx.arc(px, 64, 6, 0, Math.PI * 2);
@@ -444,10 +641,17 @@ export class Renderer {
     ctx.fillStyle = sudden ? '#ff4d6d' : s.timeLeft <= 5 && s.phase === 'playing' ? '#ffd34d' : '#fff';
     ctx.font = '700 38px "Fredoka", system-ui, sans-serif';
     const info = MODE_INFO[s.mode];
-    ctx.fillText(sudden ? info.sudden : String(Math.ceil(s.timeLeft)), WORLD_W / 2, 28);
+    let center = sudden ? info.sudden : String(Math.ceil(s.timeLeft));
+    if (s.mode === 'ttt' && s.ttt) {
+      const turn = s.ttt.turn;
+      center = s.phase !== 'playing' ? '' : view.me === turn ? 'Your turn' : `${view.names[turn]}'s turn`;
+      ctx.fillStyle = COLORS[turn];
+      ctx.font = '700 32px "Fredoka", system-ui, sans-serif';
+    }
+    ctx.fillText(center, WORLD_W / 2, 28);
     ctx.font = '500 14px "Fredoka", system-ui, sans-serif';
     ctx.fillStyle = 'rgba(232,230,255,0.55)';
-    ctx.fillText(sudden ? info.suddenSub : `${info.name} · round ${s.round} · first to ${WINS_TO_MATCH}`, WORLD_W / 2, 58);
+    ctx.fillText(sudden ? info.suddenSub : `${info.name} · round ${s.round} · first to ${info.wins}`, WORLD_W / 2, 58);
   }
 
   private drawBanner(view: View) {
@@ -459,6 +663,9 @@ export class Renderer {
     if (s.phase === 'countdown') {
       big = String(Math.max(1, Math.ceil(s.phaseTime)));
       small = s.round === 1 ? MODE_INFO[s.mode].blurb : '';
+    } else if (s.phase === 'roundOver' && s.roundWinner === null) {
+      big = 'Draw';
+      small = 'Replaying the round';
     } else if (s.phase === 'roundOver' && s.roundWinner !== null) {
       big = `${view.names[s.roundWinner]} wins the round`;
       color = COLORS[s.roundWinner];
@@ -468,6 +675,7 @@ export class Renderer {
       color = COLORS[s.roundWinner];
       small = describeChange(s.handicapBefore, s.handicap, view.names);
     }
+    if (MODE_INFO[s.mode].effect === 'none' && s.roundWinner !== null) small = '';
     if (!big) return;
     ctx.fillStyle = 'rgba(7,7,13,0.55)';
     ctx.fillRect(0, ARENA.h / 2 - 80, ARENA.w, 150);
@@ -499,6 +707,11 @@ export class Renderer {
     ctx.arc(stick.thumb.x, stick.thumb.y, 26, 0, Math.PI * 2);
     ctx.fill();
   }
+}
+
+function hexA(hex: string, a: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${Math.max(0, Math.min(1, a))})`;
 }
 
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {

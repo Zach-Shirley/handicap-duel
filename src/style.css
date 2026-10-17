@@ -135,7 +135,7 @@ button.link { background: none; border: none; color: var(--muted); font-weight: 
 .hbtns { display: flex; gap: 8px; flex-wrap: wrap; }
 .hbtns button { font-size: 14px; padding: 8px 12px; }
 .label.pick { text-align: left; margin: 16px 0 8px; }
-.modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 0 0 6px; }
+.modes { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 0 0 6px; }
 .panel > .modes { margin-top: 12px; }
 button.mode { display: flex; flex-direction: column; gap: 4px; text-align: left; padding: 12px 14px; }
 button.mode b { font-size: 17px; }

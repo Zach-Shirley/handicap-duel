@@ -1,7 +1,7 @@
 import './style.css';
 import QRCode from 'qrcode';
-import { createMatch, MODE_INFO, MODES, rematch, step, type GameEvent, type GameState, type Mode, type Vec } from './game';
-import { cloneHc, fromLegacy, MANUAL_SIZE_MIN, MANUAL_SPEED_MAX, MANUAL_SPEED_MIN, neutral, nudge, pct, sanitize, type Effect, type Handicaps, type Side } from './handicap';
+import { createMatch, MODE_INFO, MODES, playMove, rematch, step, type GameEvent, type GameState, type Mode, type Vec } from './game';
+import { cloneHc, fromLegacy, MANUAL_SIZE_MIN, MANUAL_SPEED_MAX, MANUAL_SPEED_MIN, neutral, nudge, pct, sanitize, type Effect, type Handicaps, type Side, type Stat } from './handicap';
 import { bindKeyboard, readKeys, TouchStick } from './input';
 import { GuestLink, HostLink, normalizeCode, type HostMsg, type Snapshot } from './net';
 import { Renderer } from './render';
@@ -122,6 +122,17 @@ function snapOf(s: GameState): Snapshot {
     coins: s.coins.map((c) => ({ id: c.id, x: r(c.x), y: r(c.y), value: c.value })),
     grid: s.mode === 'paint' ? s.grid.join('') : '',
     meteors: s.meteors.map((m) => ({ id: m.id, x: r(m.x), y: r(m.y), t: Math.round(m.t * 100) / 100 })),
+    ttt:
+      s.mode === 'ttt'
+        ? {
+            cells: s.ttt.cells.join(''),
+            boards: s.ttt.boards.join(''),
+            next: s.ttt.next,
+            turn: s.ttt.turn,
+            last: s.ttt.last,
+            line: s.ttt.line,
+          }
+        : null,
     roundWins: [...s.roundWins] as [number, number],
     roundWinner: s.roundWinner,
     handicap: cloneHc(s.handicap),
@@ -144,6 +155,15 @@ function playSounds(events: GameEvent[], me: 0 | 1 | null) {
         break;
       case 'hit':
         sfx.hit();
+        break;
+      case 'place':
+        sfx.place();
+        break;
+      case 'boardWon':
+        sfx.bigCoin(me === null || e.who === me);
+        break;
+      case 'draw':
+        sfx.lose();
         break;
       case 'beep':
         sfx.beep();
@@ -241,6 +261,9 @@ async function startHosting() {
       }
       if (mode === 'hostLobby') renderLobby();
     },
+    onMove(board, cell) {
+      if (mode === 'host' && state) playMove(state, 1, board, cell);
+    },
     onInput(x, y) {
       guestInput = { x, y };
       guestInputAt = performance.now();
@@ -330,7 +353,11 @@ function renderLobby() {
           <div class="hcap">
             <div class="hhead"><p class="label">Handicap</p><button id="h-reset" class="small">Reset all</button></div>
             ${handicapTable(savedHc, names)}
-            <p class="hint">In ${MODE_INFO[savedMode].name}, each round the computer player wins makes them ${MODE_INFO[savedMode].effect === 'size' ? 'bigger' : 'slower'}, with no limit. Speed and size both apply in every game. Bigger helps in Coin Rush and Paint. Saved on this computer.</p>
+            <p class="hint">${
+              MODE_INFO[savedMode].effect === 'none'
+                ? `The handicap doesn't apply in ${MODE_INFO[savedMode].name}; your settings are kept for the other games.`
+                : `In ${MODE_INFO[savedMode].name}, each round the computer player wins makes them ${MODE_INFO[savedMode].effect === 'size' ? 'bigger' : 'slower'}, with no limit. Speed and size both apply in every arena game. Bigger helps in Coin Rush and Paint.`
+            } Saved on this computer.</p>
           </div>
           <button class="primary" id="start" ${ready ? '' : 'disabled'}>${ready ? 'Start match' : 'Waiting for player 2…'}</button>
           <p class="hint">You: WASD or arrow keys. Phone: drag a thumb anywhere.</p>
@@ -350,7 +377,7 @@ function renderLobby() {
   };
   overlay.querySelectorAll<HTMLButtonElement>('.stepper button').forEach((b) =>
     b.addEventListener('click', () =>
-      commit(nudge(savedHc, Number(b.dataset.who) as Side, b.dataset.e as Effect, Number(b.dataset.d) as 1 | -1)),
+      commit(nudge(savedHc, Number(b.dataset.who) as Side, b.dataset.e as Stat, Number(b.dataset.d) as 1 | -1)),
     ),
   );
   bindModePicker((m) => {
@@ -437,9 +464,13 @@ function guestWaitScreen(text: string) {
     <div class="panel">
       <h2>${esc(text)}</h2>
       <p class="label">${esc(MODE_INFO[guestMode].name)}</p>
-      <p>${statLine(guestHc, names)}</p>
+      ${
+        guestMode === 'ttt'
+          ? `<p class="hint">${esc(MODE_INFO.ttt.blurb)}. You play blue O. Tap a square to place it.</p>`
+          : `<p>${statLine(guestHc, names)}</p>
       <p class="hint">Drag your thumb anywhere on the screen to move.</p>
-      ${portrait ? '<p class="warn">Turn your phone sideways for a bigger arena.</p>' : ''}
+      ${portrait ? '<p class="warn">Turn your phone sideways for a bigger arena.</p>' : ''}`
+      }
       <button id="fs">Go fullscreen</button>
     </div>`);
   document.getElementById('fs')!.addEventListener('click', () => void goFullscreen());
@@ -500,7 +531,7 @@ function startPractice() {
     savedMode = m;
     save('hd.mode', m);
     mode = 'practice';
-    names = ['WASD', 'Arrows'];
+    names = m === 'ttt' ? ['Red', 'Blue'] : ['WASD', 'Arrows'];
     state = createMatch(neutral(), m);
     show('');
   });
@@ -547,6 +578,34 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && mode === 'practice') leave();
 });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// Tic-tac-toe input: a tap or click on the board places a mark.
+let downAt: { x: number; y: number } | null = null;
+canvas.addEventListener('pointerdown', (e) => {
+  downAt = { x: e.clientX, y: e.clientY };
+});
+canvas.addEventListener('pointermove', (e) => {
+  renderer.pointer = e.pointerType === 'mouse' ? { x: e.clientX, y: e.clientY } : null;
+});
+canvas.addEventListener('pointerleave', () => {
+  renderer.pointer = null;
+});
+canvas.addEventListener('pointerup', (e) => {
+  const start = downAt;
+  downAt = null;
+  // Ignore drags (thumb slid across the screen).
+  if (start && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 24) return;
+  const hit = renderer.hitTtt(e.clientX, e.clientY);
+  if (!hit) return;
+  unlockAudio();
+  if ((mode === 'host' || mode === 'practice') && state?.mode === 'ttt') {
+    const who = mode === 'practice' ? state.ttt.turn : 0;
+    playMove(state, who, hit.board, hit.cell);
+  } else if (mode === 'guest') {
+    const latest = snaps[snaps.length - 1]?.s;
+    if (latest?.ttt && latest.phase === 'playing' && latest.ttt.turn === 1) guest?.sendMove(hit.board, hit.cell);
+  }
+});
 
 // ---------- main loop ----------
 const FIXED = 1 / 120;
@@ -611,7 +670,8 @@ function tick(now: number) {
       if (mode === 'host') matchOverPanel(true);
       else practiceOver();
     }
-    renderer.draw({ snap: snapOf(state), names, me: mode === 'host' ? 0 : null }, dt);
+    const canPlay = state.mode === 'ttt' && state.phase === 'playing' && (mode === 'practice' || state.ttt.turn === 0);
+    renderer.draw({ snap: snapOf(state), names, me: mode === 'host' ? 0 : null, canPlay }, dt);
   } else if (mode === 'guest') {
     if (now - lastSend >= 33) {
       const kb = readKeys('both');
@@ -620,7 +680,11 @@ function tick(now: number) {
       lastSend = now;
     }
     const view = guestView(now);
-    if (view) renderer.draw({ snap: view, names, me: 1, stick }, dt);
+    if (view) {
+      const ttt = view.mode === 'ttt';
+      const canPlay = ttt && view.phase === 'playing' && view.ttt?.turn === 1;
+      renderer.draw({ snap: view, names, me: 1, stick: ttt ? null : stick, canPlay }, dt);
+    }
   } else {
     acc = 0;
     renderer.draw({ snap: idleSnap(now), names: ['', ''], me: null, idle: true }, dt);
@@ -661,6 +725,7 @@ function idleSnap(now: number): Snapshot {
     ],
     grid: '',
     meteors: [],
+    ttt: null,
     roundWins: [0, 0],
     roundWinner: null,
     handicap: neutral(),
@@ -685,5 +750,6 @@ if (import.meta.env.DEV) {
     snaps: () => snaps.length,
     mode: () => mode,
     stick: () => stick.read(),
+    board: () => (renderer as unknown as { board: unknown }).board,
   };
 }

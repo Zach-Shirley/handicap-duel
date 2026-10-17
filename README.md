@@ -2,13 +2,14 @@
 
 A two-player arena game built so a younger sibling can actually beat an older one. One player is on a computer and the other on a phone, and every round the computer player wins handicaps them a bit more. Each round the phone player wins takes some of that handicap back. Over a few matches the game settles where the weaker player wins about half the time.
 
-Three games, picked in the lobby:
+Four games, picked in the lobby:
 
 | Game | Goal | Handicap |
 |---|---|---|
 | **Coin Rush** | Grab the most coins in 30 seconds. Big orange coins are worth 3. | Speed ×0.92 per win |
 | **Paint the Floor** | Your dot paints the floor tiles it touches. Own more floor after 30 seconds. You can paint over the other player's tiles. | Speed ×0.92 per win |
 | **Meteor Dodge** | Meteors land where the warning circles are. One hit and you're out. If you both survive 30 seconds, a meteor storm starts. | +16% size per win |
+| **Mega Tic-Tac-Toe** | Nine tic-tac-toe boards in one. The cell you play picks the board the other player must use next; if that board is won or full, they can play anywhere. Three small boards in a row wins. First to 2. | None |
 
 ## How to play
 
@@ -19,7 +20,8 @@ Three games, picked in the lobby:
 - Computer: WASD or arrow keys.
 - Phone: put a thumb anywhere and drag. The stick follows your thumb.
 - Bumping into the other player knocks you both back.
-- A tied round goes to sudden death: the next coin or tile wins.
+- A tied round goes to sudden death: the next coin or tile wins. In Mega Tic-Tac-Toe, a full board with no line goes to whoever won more small boards, otherwise the round is replayed.
+- In Mega Tic-Tac-Toe the computer player is red X and the phone player is blue O. The phone player moves first in round 1, then the first move alternates. Tap or click a square to play.
 - In Meteor Dodge, about half the meteors aim at where a player is standing, alternating between the two players. If both players are hit in the same instant, nobody is out.
 - The handicap has no limit. Speed keeps shrinking by 8% of its current value (it never reaches zero), and size keeps growing until the dot fills the arena from top to bottom.
 - A computer win first takes back any handicap on the phone player, then handicaps the computer player. A phone win takes back one step of the computer player's handicap and never handicaps the phone player.

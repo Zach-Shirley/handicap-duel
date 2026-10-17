@@ -36,6 +36,8 @@ export interface Snapshot {
   /** Paint grid as a string of '0' / '1' / '2', row-major. Empty outside paint mode. */
   grid: string;
   meteors: { id: number; x: number; y: number; t: number }[];
+  /** Tic-tac-toe: cells (81 chars) and boards (9 chars) as digit strings. */
+  ttt: { cells: string; boards: string; next: number; turn: 0 | 1; last: number; line: number[] | null } | null;
   roundWins: [number, number];
   roundWinner: 0 | 1 | null;
   handicap: Handicaps;
@@ -49,12 +51,13 @@ export type HostMsg =
   | { t: 'toLobby' }
   | { t: 'full' };
 
-export type GuestMsg = { t: 'hello'; name: string } | { t: 'i'; x: number; y: number };
+export type GuestMsg = { t: 'hello'; name: string } | { t: 'i'; x: number; y: number } | { t: 'move'; b: number; c: number };
 
 export interface HostHandlers {
   onGuest(name: string): void;
   onGuestLeft(): void;
   onInput(x: number, y: number): void;
+  onMove(board: number, cell: number): void;
   onStatus(text: string): void;
 }
 
@@ -121,6 +124,7 @@ export class HostLink {
       if (!m || typeof m !== 'object') return;
       if (m.t === 'hello') this.h.onGuest(String(m.name || 'Player 2').slice(0, 16));
       else if (m.t === 'i') this.h.onInput(Number(m.x) || 0, Number(m.y) || 0);
+      else if (m.t === 'move') this.h.onMove(Math.trunc(Number(m.b)), Math.trunc(Number(m.c)));
     });
     c.on('close', () => {
       if (this.conn === c) {
@@ -205,6 +209,10 @@ export class GuestLink {
     if (this.conn && this.conn.open) {
       this.conn.send({ t: 'i', x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100 } satisfies GuestMsg);
     }
+  }
+
+  sendMove(board: number, cell: number) {
+    if (this.conn && this.conn.open) this.conn.send({ t: 'move', b: board, c: cell } satisfies GuestMsg);
   }
 
   destroy() {

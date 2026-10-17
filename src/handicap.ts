@@ -14,7 +14,8 @@
  */
 
 export type Side = 0 | 1;
-export type Effect = 'speed' | 'size';
+export type Effect = 'speed' | 'size' | 'none';
+export type Stat = Exclude<Effect, 'none'>;
 
 export interface Handicaps {
   speed: [number, number];
@@ -68,16 +69,16 @@ export function fromLegacy(h: number): Handicaps {
   return out;
 }
 
-function isHandicapped(h: Handicaps, who: Side, effect: Effect): boolean {
+function isHandicapped(h: Handicaps, who: Side, effect: Stat): boolean {
   return effect === 'speed' ? h.speed[who] < 1 : h.size[who] > 1;
 }
 
-function handicapStep(h: Handicaps, who: Side, effect: Effect) {
+function handicapStep(h: Handicaps, who: Side, effect: Stat) {
   if (effect === 'speed') h.speed[who] = tidy(h.speed[who] * SPEED_FACTOR);
   else h.size[who] = tidy(h.size[who] + SIZE_STEP);
 }
 
-function easeStep(h: Handicaps, who: Side, effect: Effect) {
+function easeStep(h: Handicaps, who: Side, effect: Stat) {
   if (effect === 'speed') h.speed[who] = Math.min(1, tidy(h.speed[who] / SPEED_FACTOR));
   else h.size[who] = Math.max(1, tidy(h.size[who] - SIZE_STEP));
   // Snap float residue back to exactly normal.
@@ -87,6 +88,7 @@ function easeStep(h: Handicaps, who: Side, effect: Effect) {
 
 export function applyRoundResult(prev: Handicaps, winner: Side, effect: Effect): Handicaps {
   const h = cloneHc(prev);
+  if (effect === 'none') return h;
   if (winner === 0) {
     if (isHandicapped(h, 1, effect)) easeStep(h, 1, effect);
     else handicapStep(h, 0, effect);
@@ -97,7 +99,7 @@ export function applyRoundResult(prev: Handicaps, winner: Side, effect: Effect):
 }
 
 /** Lobby +/- buttons. dir = +1 means "more" of the value (faster / bigger). */
-export function nudge(prev: Handicaps, who: Side, effect: Effect, dir: 1 | -1): Handicaps {
+export function nudge(prev: Handicaps, who: Side, effect: Stat, dir: 1 | -1): Handicaps {
   const h = cloneHc(prev);
   if (effect === 'speed') {
     const v = Math.round((h.speed[who] + dir * MANUAL_SPEED_STEP) / MANUAL_SPEED_STEP) * MANUAL_SPEED_STEP;
