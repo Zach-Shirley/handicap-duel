@@ -51,6 +51,14 @@ export const sfx = {
   bump() {
     tone(140, 0.18, 'sine', 0.25, 0, 60);
   },
+  boom() {
+    tone(110, 0.25, 'sawtooth', 0.06, 0, 40);
+    tone(70, 0.3, 'sine', 0.18, 0, 35);
+  },
+  hit() {
+    tone(220, 0.5, 'sawtooth', 0.12, 0, 50);
+    tone(90, 0.6, 'sine', 0.25, 0.05, 30);
+  },
   beep() {
     tone(600, 0.12, 'sine', 0.12);
   },

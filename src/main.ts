@@ -1,7 +1,7 @@
 import './style.css';
 import QRCode from 'qrcode';
-import { createMatch, rematch, step, type GameEvent, type GameState, type Vec } from './game';
-import { clampHandicap, HANDICAP_MAX, HANDICAP_STEP, speedPercent, speedsFor } from './handicap';
+import { createMatch, MODE_INFO, MODES, rematch, step, type GameEvent, type GameState, type Mode, type Vec } from './game';
+import { clampHandicap, HANDICAP_MAX, HANDICAP_STEP, sizesFor, speedPercent, speedsFor } from './handicap';
 import { bindKeyboard, readKeys, TouchStick } from './input';
 import { GuestLink, HostLink, normalizeCode, type HostMsg, type Snapshot } from './net';
 import { Renderer } from './render';
@@ -41,10 +41,12 @@ function save(key: string, value: string) {
 }
 let myName = load('hd.name', '');
 let savedHandicap = clampHandicap(Number(load('hd.handicap', '0')) || 0);
+const storedMode = load('hd.mode', 'coins') as Mode;
+let savedMode: Mode = MODES.includes(storedMode) ? storedMode : 'coins';
 
 // ---------- app state ----------
-type Mode = 'menu' | 'hostLobby' | 'host' | 'guestWait' | 'guest' | 'practice';
-let mode: Mode = 'menu';
+type Screen = 'menu' | 'hostLobby' | 'host' | 'guestWait' | 'guest' | 'practice';
+let mode: Screen = 'menu';
 let host: HostLink | null = null;
 let guest: GuestLink | null = null;
 let state: GameState | null = null;
@@ -58,6 +60,7 @@ let lobbyStatus = '';
 // Guest-side snapshot buffer for smooth interpolation.
 let snaps: { at: number; s: Snapshot }[] = [];
 let guestHandicap = 0;
+let guestMode: Mode = 'coins';
 let wakeLock: { release(): Promise<void> } | null = null;
 
 // ---------- helpers ----------
@@ -96,12 +99,15 @@ function releaseAwake() {
 function snapOf(s: GameState): Snapshot {
   const r = (n: number) => Math.round(n * 10) / 10;
   return {
+    mode: s.mode,
     phase: s.phase,
     phaseTime: r(s.phaseTime),
     timeLeft: r(s.timeLeft),
     round: s.round,
-    players: s.players.map((p) => ({ x: r(p.x), y: r(p.y), score: p.score, speed: p.speed })),
+    players: s.players.map((p) => ({ x: r(p.x), y: r(p.y), score: p.score, speed: p.speed, r: p.r, alive: p.alive })),
     coins: s.coins.map((c) => ({ id: c.id, x: r(c.x), y: r(c.y), value: c.value })),
+    grid: s.mode === 'paint' ? s.grid.join('') : '',
+    meteors: s.meteors.map((m) => ({ id: m.id, x: r(m.x), y: r(m.y), t: Math.round(m.t * 100) / 100 })),
     roundWins: [...s.roundWins] as [number, number],
     roundWinner: s.roundWinner,
     handicap: s.handicap,
@@ -118,6 +124,12 @@ function playSounds(events: GameEvent[], me: 0 | 1 | null) {
         break;
       case 'bump':
         sfx.bump();
+        break;
+      case 'boom':
+        sfx.boom();
+        break;
+      case 'hit':
+        sfx.hit();
         break;
       case 'beep':
         sfx.beep();
@@ -238,12 +250,27 @@ async function startHosting() {
 }
 
 function sendLobby() {
-  host?.send({ t: 'lobby', hostName: names[0], guestName: names[1], handicap: savedHandicap });
+  host?.send({ t: 'lobby', hostName: names[0], guestName: names[1], handicap: savedHandicap, mode: savedMode });
 }
 
-function speedLine(h: number, n: [string, string]): string {
-  const [a, b] = speedsFor(h);
-  return `<span style="color:var(--p1)">${esc(n[0])} ${speedPercent(a)}%</span> · <span style="color:var(--p2)">${esc(n[1])} ${speedPercent(b)}%</span>`;
+function speedLine(h: number, n: [string, string], m: Mode): string {
+  const size = MODE_INFO[m].effect === 'size';
+  const [a, b] = size ? sizesFor(h) : speedsFor(h);
+  const word = size ? 'size' : 'speed';
+  return `<span style="color:var(--p1)">${esc(n[0])} ${word} ${speedPercent(a)}%</span> · <span style="color:var(--p2)">${esc(n[1])} ${word} ${speedPercent(b)}%</span>`;
+}
+
+/** Game picker; calls onPick when a different game is chosen. */
+function modePicker(current: Mode): string {
+  return `<div class="modes">${MODES.map(
+    (m) => `<button class="mode ${m === current ? 'on' : ''}" data-mode="${m}"><b>${MODE_INFO[m].name}</b><small>${MODE_INFO[m].blurb}</small></button>`,
+  ).join('')}</div>`;
+}
+
+function bindModePicker(onPick: (m: Mode) => void) {
+  overlay.querySelectorAll<HTMLButtonElement>('button.mode').forEach((b) =>
+    b.addEventListener('click', () => onPick(b.dataset.mode as Mode)),
+  );
 }
 
 function renderLobby() {
@@ -263,15 +290,21 @@ function renderLobby() {
           <p class="code">${host.code}</p>
           <p class="hint url">${esc(url)}</p>
           <p class="status ${ready ? 'ok' : ''}">${esc(lobbyStatus)}</p>
+        </div>
+      </div>
+      <p class="label pick">Pick a game</p>
+      ${modePicker(savedMode)}
+      <div class="lobby">
+        <div class="lobbyinfo">
           <div class="hcap">
-            <p class="label">Starting speeds</p>
-            <p>${speedLine(savedHandicap, names)}</p>
+            <p class="label">Handicap</p>
+            <p>${speedLine(savedHandicap, names, savedMode)}</p>
             <div class="hbtns">
-              <button id="h-me" title="Slow ${esc(names[0])} down">Slow ${esc(names[0])}</button>
+              <button id="h-me">Handicap ${esc(names[0])}</button>
               <button id="h-reset">Even</button>
-              <button id="h-them" title="Slow ${esc(names[1])} down">Slow ${esc(names[1])}</button>
+              <button id="h-them">Handicap ${esc(names[1])}</button>
             </div>
-            <p class="hint">The computer player gets slowed by winning. Speeds carry over between matches on this computer.</p>
+            <p class="hint">Each round the computer player wins makes them ${MODE_INFO[savedMode].effect === 'size' ? 'bigger' : 'slower'}. Carries over between matches and games on this computer.</p>
           </div>
           <button class="primary" id="start" ${ready ? '' : 'disabled'}>${ready ? 'Start match' : 'Waiting for player 2…'}</button>
           <p class="hint">You: WASD or arrow keys. Phone: drag a thumb anywhere.</p>
@@ -289,6 +322,12 @@ function renderLobby() {
     sendLobby();
     renderLobby();
   };
+  bindModePicker((m) => {
+    savedMode = m;
+    save('hd.mode', m);
+    sendLobby();
+    renderLobby();
+  });
   document.getElementById('h-me')!.addEventListener('click', () => adjust(HANDICAP_STEP));
   document.getElementById('h-them')!.addEventListener('click', () => adjust(-HANDICAP_STEP));
   document.getElementById('h-reset')!.addEventListener('click', () => adjust(-savedHandicap));
@@ -297,7 +336,7 @@ function renderLobby() {
   document.getElementById('start')!.addEventListener('click', () => {
     if (!host?.connected) return;
     unlockAudio();
-    state = createMatch(savedHandicap);
+    state = createMatch(savedHandicap, savedMode);
     pendingNetEvents = [];
     mode = 'host';
     show('');
@@ -370,7 +409,8 @@ function guestWaitScreen(text: string) {
   show(`
     <div class="panel">
       <h2>${esc(text)}</h2>
-      <p>${speedLine(guestHandicap, names)}</p>
+      <p class="label">${esc(MODE_INFO[guestMode].name)}</p>
+      <p>${speedLine(guestHandicap, names, guestMode)}</p>
       <p class="hint">Drag your thumb anywhere on the screen to move.</p>
       ${portrait ? '<p class="warn">Turn your phone sideways for a bigger arena.</p>' : ''}
       <button id="fs">Go fullscreen</button>
@@ -383,7 +423,10 @@ function onHostMsg(m: HostMsg) {
     case 'welcome':
     case 'lobby':
       names = [m.hostName, m.guestName];
-      if (m.t === 'lobby') guestHandicap = m.handicap;
+      if (m.t === 'lobby') {
+        guestHandicap = m.handicap;
+        guestMode = m.mode;
+      }
       if (mode === 'guestWait') guestWaitScreen('Connected! Waiting for the host to start…');
       break;
     case 'toLobby':
@@ -418,11 +461,23 @@ function onHostMsg(m: HostMsg) {
 }
 
 function startPractice() {
-  mode = 'practice';
-  names = ['WASD', 'Arrows'];
-  state = createMatch(0);
   corner.classList.remove('hidden');
-  show('');
+  show(`
+    <div class="panel wide">
+      <h2>Practice: two players, one keyboard</h2>
+      <p class="hint">Left player: WASD. Right player: arrow keys. Esc to quit.</p>
+      ${modePicker(savedMode)}
+      <button class="link" id="back">Back</button>
+    </div>`);
+  bindModePicker((m) => {
+    savedMode = m;
+    save('hd.mode', m);
+    mode = 'practice';
+    names = ['WASD', 'Arrows'];
+    state = createMatch(0, m);
+    show('');
+  });
+  document.getElementById('back')!.addEventListener('click', () => leave());
 }
 
 async function goFullscreen() {
@@ -563,19 +618,22 @@ function practiceOver() {
 function idleSnap(now: number): Snapshot {
   const t = now / 1000;
   return {
+    mode: 'coins',
     phase: 'playing',
     phaseTime: 0,
     timeLeft: 30,
     round: 1,
     players: [
-      { x: 500 + Math.cos(t * 0.7) * 320, y: 312 + Math.sin(t * 1.1) * 180, score: 0, speed: 1 },
-      { x: 500 + Math.cos(t * 0.9 + 2) * 300, y: 312 + Math.sin(t * 0.8 + 1) * 200, score: 0, speed: 1 },
+      { x: 500 + Math.cos(t * 0.7) * 320, y: 312 + Math.sin(t * 1.1) * 180, score: 0, speed: 1, r: 24, alive: true },
+      { x: 500 + Math.cos(t * 0.9 + 2) * 300, y: 312 + Math.sin(t * 0.8 + 1) * 200, score: 0, speed: 1, r: 24, alive: true },
     ],
     coins: [
       { id: 1, x: 300, y: 200, value: 1 },
       { id: 2, x: 700, y: 420, value: 1 },
       { id: 3, x: 520, y: 140, value: 3 },
     ],
+    grid: '',
+    meteors: [],
     roundWins: [0, 0],
     roundWinner: null,
     handicap: 0,

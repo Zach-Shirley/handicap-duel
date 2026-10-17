@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyRoundResult, clampHandicap, describeChange, HANDICAP_MAX, speedsFor } from '../src/handicap';
+import { applyRoundResult, clampHandicap, describeChange, HANDICAP_MAX, sizesFor, speedsFor } from '../src/handicap';
 
 describe('handicap', () => {
   it('starts even at full speed', () => {
@@ -42,6 +42,13 @@ describe('handicap', () => {
     expect(describeChange(0.16, 0.08, ['Zach', 'Sis'])).toBe('Zach sped up to 92%');
     expect(describeChange(0.04, -0.04, ['Zach', 'Sis'])).toBe('Zach sped up to 100% · Sis slowed to 96%');
     expect(describeChange(0, 0, ['Zach', 'Sis'])).toBe('Zach is already at full speed');
-    expect(describeChange(-0.16, -0.16, ['Zach', 'Sis'])).toBe('No speed change');
+    expect(describeChange(-0.16, -0.16, ['Zach', 'Sis'])).toBe('No change');
+  });
+
+  it('size handicap grows the penalised player for Meteor Dodge', () => {
+    expect(sizesFor(0)).toEqual([1, 1]);
+    expect(sizesFor(0.08)).toEqual([1.16, 1]);
+    expect(describeChange(0, 0.08, ['Zach', 'Sis'], 'size')).toBe('Zach grew to 116% size');
+    expect(describeChange(0.08, 0, ['Zach', 'Sis'], 'size')).toBe('Zach shrank to 100% size');
   });
 });

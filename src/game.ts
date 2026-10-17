@@ -1,4 +1,4 @@
-import { applyRoundResult, speedsFor, type Side } from './handicap';
+import { applyRoundResult, sizesFor, speedsFor, type Effect, type Side } from './handicap';
 
 export const ARENA = { w: 1000, h: 625 };
 export const PLAYER_R = 24;
@@ -14,6 +14,47 @@ export const MAX_COINS = 3;
 export const COIN_RESPAWN = 0.6;
 export const BIG_COIN_CHANCE = 0.12;
 export const BUMP_COOLDOWN = 0.25;
+
+// Paint the Floor
+export const CELL = 25;
+export const GRID_W = ARENA.w / CELL; // 40
+export const GRID_H = Math.round(ARENA.h / CELL); // 25
+export const GRID_N = GRID_W * GRID_H;
+
+// Meteor Dodge
+export const METEOR_WARN = 1.1; // seconds between warning circle and impact
+export const BLAST_R = 55;
+export const METEOR_GAP_START = 0.9;
+export const METEOR_GAP_END = 0.3;
+export const METEOR_GAP_STORM = 0.12;
+/** Hits are judged against 80% of the player's radius: grazes don't count. */
+export const HIT_FORGIVENESS = 0.8;
+
+export type Mode = 'coins' | 'paint' | 'meteor';
+export const MODES: Mode[] = ['coins', 'paint', 'meteor'];
+export const MODE_INFO: Record<Mode, { name: string; blurb: string; effect: Effect; sudden: string; suddenSub: string }> = {
+  coins: {
+    name: 'Coin Rush',
+    blurb: 'Grab the most coins in 30 seconds',
+    effect: 'speed',
+    sudden: 'SUDDEN DEATH',
+    suddenSub: 'next coin wins',
+  },
+  paint: {
+    name: 'Paint the Floor',
+    blurb: 'Cover more floor than the other player',
+    effect: 'speed',
+    sudden: 'SUDDEN DEATH',
+    suddenSub: 'next tile wins',
+  },
+  meteor: {
+    name: 'Meteor Dodge',
+    blurb: 'Dodge the meteors. One hit and you are out',
+    effect: 'size',
+    sudden: 'METEOR STORM',
+    suddenSub: 'last one standing',
+  },
+};
 
 export type Rng = () => number;
 export type Phase = 'countdown' | 'playing' | 'sudden' | 'roundOver' | 'matchOver';
@@ -33,6 +74,8 @@ export interface Player {
   ky: number;
   score: number;
   speed: number;
+  r: number;
+  alive: boolean;
 }
 
 export interface Coin {
@@ -42,9 +85,19 @@ export interface Coin {
   value: number;
 }
 
+export interface Meteor {
+  id: number;
+  x: number;
+  y: number;
+  /** Seconds until impact. */
+  t: number;
+}
+
 export type GameEvent =
   | { kind: 'coin'; who: Side; value: number; x: number; y: number }
   | { kind: 'bump'; x: number; y: number; force: number }
+  | { kind: 'boom'; x: number; y: number }
+  | { kind: 'hit'; who: Side; x: number; y: number }
   | { kind: 'beep'; n: number }
   | { kind: 'go' }
   | { kind: 'sudden' }
@@ -52,6 +105,7 @@ export type GameEvent =
   | { kind: 'match'; winner: Side };
 
 export interface GameState {
+  mode: Mode;
   phase: Phase;
   /** Seconds left in countdown / roundOver. */
   phaseTime: number;
@@ -60,9 +114,12 @@ export interface GameState {
   round: number;
   players: [Player, Player];
   coins: Coin[];
-  nextCoinId: number;
+  nextId: number;
   spawnTimer: number;
   bumpCooldown: number;
+  /** Paint ownership per cell: 0 empty, 1 host, 2 guest. */
+  grid: Uint8Array;
+  meteors: Meteor[];
   roundWins: [number, number];
   roundWinner: Side | null;
   handicap: number;
@@ -70,22 +127,24 @@ export interface GameState {
   events: GameEvent[];
 }
 
-function makePlayer(x: number, y: number, speed: number): Player {
-  return { x, y, vx: 0, vy: 0, kx: 0, ky: 0, score: 0, speed };
+function makePlayer(x: number, y: number, speed: number, r: number): Player {
+  return { x, y, vx: 0, vy: 0, kx: 0, ky: 0, score: 0, speed, r, alive: true };
 }
 
-export function createMatch(handicap: number, rng: Rng = Math.random): GameState {
-  const [s0, s1] = speedsFor(handicap);
+export function createMatch(handicap: number, mode: Mode = 'coins', rng: Rng = Math.random): GameState {
   const state: GameState = {
+    mode,
     phase: 'countdown',
     phaseTime: COUNTDOWN_TIME,
     timeLeft: ROUND_TIME,
     round: 0,
-    players: [makePlayer(0, 0, s0), makePlayer(0, 0, s1)],
+    players: [makePlayer(0, 0, 1, PLAYER_R), makePlayer(0, 0, 1, PLAYER_R)],
     coins: [],
-    nextCoinId: 1,
+    nextId: 1,
     spawnTimer: 0,
     bumpCooldown: 0,
+    grid: new Uint8Array(GRID_N),
+    meteors: [],
     roundWins: [0, 0],
     roundWinner: null,
     handicap,
@@ -97,12 +156,16 @@ export function createMatch(handicap: number, rng: Rng = Math.random): GameState
 }
 
 export function startRound(state: GameState, rng: Rng = Math.random): void {
-  const [s0, s1] = speedsFor(state.handicap);
+  const meteor = state.mode === 'meteor';
+  const speeds = meteor ? [1, 1] : speedsFor(state.handicap);
+  const sizes = meteor ? sizesFor(state.handicap) : [1, 1];
   state.players = [
-    makePlayer(ARENA.w * 0.2, ARENA.h / 2, s0),
-    makePlayer(ARENA.w * 0.8, ARENA.h / 2, s1),
+    makePlayer(ARENA.w * 0.2, ARENA.h / 2, speeds[0], PLAYER_R * sizes[0]),
+    makePlayer(ARENA.w * 0.8, ARENA.h / 2, speeds[1], PLAYER_R * sizes[1]),
   ];
   state.coins = [];
+  state.meteors = [];
+  state.grid = new Uint8Array(GRID_N);
   state.round += 1;
   state.phase = 'countdown';
   state.phaseTime = COUNTDOWN_TIME;
@@ -110,9 +173,11 @@ export function startRound(state: GameState, rng: Rng = Math.random): void {
   state.roundWinner = null;
   state.spawnTimer = 0;
   state.bumpCooldown = 0;
-  // Opening coins: one fair coin on the center line, plus one random.
-  state.coins.push({ id: state.nextCoinId++, x: ARENA.w / 2, y: ARENA.h / 2, value: 1 });
-  spawnCoin(state, rng);
+  if (state.mode === 'coins') {
+    // Opening coins: one fair coin on the center line, plus one random.
+    state.coins.push({ id: state.nextId++, x: ARENA.w / 2, y: ARENA.h / 2, value: 1 });
+    spawnCoin(state, rng);
+  }
 }
 
 export function rematch(state: GameState, rng: Rng = Math.random): void {
@@ -121,7 +186,7 @@ export function rematch(state: GameState, rng: Rng = Math.random): void {
   startRound(state, rng);
 }
 
-export function spawnCoin(state: GameState, rng: Rng): Coin {
+function randomSpot(state: GameState, rng: Rng, playerGap: number, coinGap: number): Vec {
   const margin = 50;
   let best: Vec = { x: ARENA.w / 2, y: ARENA.h / 2 };
   let bestScore = -Infinity;
@@ -130,27 +195,58 @@ export function spawnCoin(state: GameState, rng: Rng): Coin {
       x: margin + rng() * (ARENA.w - margin * 2),
       y: margin + rng() * (ARENA.h - margin * 2),
     };
-    // Prefer spots not right under a player or on top of another coin.
     let clearance = Infinity;
-    for (const pl of state.players) clearance = Math.min(clearance, dist(p, pl) - 120);
-    for (const c of state.coins) clearance = Math.min(clearance, dist(p, c) - 60);
-    if (clearance >= 0) {
-      best = p;
-      break;
-    }
+    for (const pl of state.players) clearance = Math.min(clearance, dist(p, pl) - playerGap);
+    for (const c of state.coins) clearance = Math.min(clearance, dist(p, c) - coinGap);
+    if (clearance >= 0) return p;
     if (clearance > bestScore) {
       bestScore = clearance;
       best = p;
     }
   }
-  const coin: Coin = {
-    id: state.nextCoinId++,
-    x: best.x,
-    y: best.y,
-    value: rng() < BIG_COIN_CHANCE ? 3 : 1,
-  };
+  return best;
+}
+
+export function spawnCoin(state: GameState, rng: Rng): Coin {
+  const p = randomSpot(state, rng, 120, 60);
+  const coin: Coin = { id: state.nextId++, x: p.x, y: p.y, value: rng() < BIG_COIN_CHANCE ? 3 : 1 };
   state.coins.push(coin);
   return coin;
+}
+
+/**
+ * Meteors alternate between aiming at a player (where they are now, so moving
+ * dodges it) and landing somewhere random. Targets alternate between players
+ * so neither side is picked on.
+ */
+export function spawnMeteor(state: GameState, rng: Rng): Meteor {
+  const n = state.nextId++;
+  let x: number;
+  let y: number;
+  if (n % 2 === 0) {
+    const target = state.players[(n / 2) % 2];
+    const a = rng() * Math.PI * 2;
+    const off = rng() * 40;
+    x = target.x + Math.cos(a) * off;
+    y = target.y + Math.sin(a) * off;
+  } else {
+    x = 30 + rng() * (ARENA.w - 60);
+    y = 30 + rng() * (ARENA.h - 60);
+  }
+  const m: Meteor = {
+    id: n,
+    x: Math.max(20, Math.min(ARENA.w - 20, x)),
+    y: Math.max(20, Math.min(ARENA.h - 20, y)),
+    t: METEOR_WARN,
+  };
+  state.meteors.push(m);
+  return m;
+}
+
+export function meteorGap(state: GameState): number {
+  if (state.phase === 'sudden') return METEOR_GAP_STORM;
+  const k = Math.min(1, (ROUND_TIME - state.timeLeft) / ROUND_TIME);
+  return METEOR_GAP_START + (METEOR_GAP_END - METEOR_GAP_START) * k;
 }
 
 export function coinRadius(c: Coin): number {
@@ -168,7 +264,7 @@ function clampStick(v: Vec): Vec {
 }
 
 function movePlayer(p: Player, input: Vec, dt: number): void {
-  const stick = clampStick(input);
+  const stick = p.alive ? clampStick(input) : { x: 0, y: 0 };
   const max = BASE_SPEED * p.speed;
   const tx = stick.x * max;
   const ty = stick.y * max;
@@ -188,26 +284,27 @@ function movePlayer(p: Player, input: Vec, dt: number): void {
   p.ky *= decay;
   p.x += (p.vx + p.kx) * dt;
   p.y += (p.vy + p.ky) * dt;
-  if (p.x < PLAYER_R) {
-    p.x = PLAYER_R;
+  if (p.x < p.r) {
+    p.x = p.r;
     p.kx = Math.abs(p.kx);
-  } else if (p.x > ARENA.w - PLAYER_R) {
-    p.x = ARENA.w - PLAYER_R;
+  } else if (p.x > ARENA.w - p.r) {
+    p.x = ARENA.w - p.r;
     p.kx = -Math.abs(p.kx);
   }
-  if (p.y < PLAYER_R) {
-    p.y = PLAYER_R;
+  if (p.y < p.r) {
+    p.y = p.r;
     p.ky = Math.abs(p.ky);
-  } else if (p.y > ARENA.h - PLAYER_R) {
-    p.y = ARENA.h - PLAYER_R;
+  } else if (p.y > ARENA.h - p.r) {
+    p.y = ARENA.h - p.r;
     p.ky = -Math.abs(p.ky);
   }
 }
 
 function resolveBump(state: GameState): void {
   const [a, b] = state.players;
+  if (!a.alive || !b.alive) return;
   const d = dist(a, b);
-  const minD = PLAYER_R * 2;
+  const minD = a.r + b.r;
   if (d >= minD) return;
   const nx = d > 0 ? (b.x - a.x) / d : 1;
   const ny = d > 0 ? (b.y - a.y) / d : 0;
@@ -227,23 +324,80 @@ function resolveBump(state: GameState): void {
   state.events.push({ kind: 'bump', x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, force });
 }
 
-function collectCoins(state: GameState): Side | null {
+function collectCoins(state: GameState): void {
   for (let ci = state.coins.length - 1; ci >= 0; ci--) {
     const c = state.coins[ci];
-    const r = coinRadius(c) + PLAYER_R;
-    const d0 = dist(state.players[0], c);
-    const d1 = dist(state.players[1], c);
+    const [p0, p1] = state.players;
+    const d0 = dist(p0, c);
+    const d1 = dist(p1, c);
+    const in0 = d0 < coinRadius(c) + p0.r;
+    const in1 = d1 < coinRadius(c) + p1.r;
     let who: Side | null = null;
-    if (d0 < r && d1 < r) who = d0 <= d1 ? 0 : 1;
-    else if (d0 < r) who = 0;
-    else if (d1 < r) who = 1;
+    if (in0 && in1) who = d0 <= d1 ? 0 : 1;
+    else if (in0) who = 0;
+    else if (in1) who = 1;
     if (who === null) continue;
     state.players[who].score += c.value;
     state.coins.splice(ci, 1);
     state.events.push({ kind: 'coin', who, value: c.value, x: c.x, y: c.y });
-    if (state.phase === 'sudden') return who;
   }
-  return null;
+}
+
+/** Paint every cell whose centre lies under a player. Scores are cell counts. */
+export function paintCells(state: GameState): void {
+  state.players.forEach((p, i) => {
+    const owner = i + 1;
+    const r = p.r + 2;
+    const cx0 = Math.max(0, Math.floor((p.x - r) / CELL));
+    const cx1 = Math.min(GRID_W - 1, Math.floor((p.x + r) / CELL));
+    const cy0 = Math.max(0, Math.floor((p.y - r) / CELL));
+    const cy1 = Math.min(GRID_H - 1, Math.floor((p.y + r) / CELL));
+    for (let cy = cy0; cy <= cy1; cy++) {
+      for (let cx = cx0; cx <= cx1; cx++) {
+        const mx = (cx + 0.5) * CELL;
+        const my = (cy + 0.5) * CELL;
+        if ((mx - p.x) ** 2 + (my - p.y) ** 2 > r * r) continue;
+        const k = cy * GRID_W + cx;
+        const prev = state.grid[k];
+        if (prev === owner) continue;
+        if (prev) state.players[prev - 1].score -= 1;
+        state.grid[k] = owner;
+        p.score += 1;
+      }
+    }
+  });
+}
+
+function updateMeteors(state: GameState, dt: number, rng: Rng): void {
+  state.spawnTimer += dt;
+  const gap = meteorGap(state);
+  while (state.spawnTimer >= gap) {
+    state.spawnTimer -= gap;
+    spawnMeteor(state, rng);
+  }
+  const hit: [boolean, boolean] = [false, false];
+  for (let i = state.meteors.length - 1; i >= 0; i--) {
+    const m = state.meteors[i];
+    m.t -= dt;
+    if (m.t > 0) continue;
+    state.meteors.splice(i, 1);
+    state.events.push({ kind: 'boom', x: m.x, y: m.y });
+    state.players.forEach((p, j) => {
+      if (p.alive && dist(p, m) < BLAST_R + p.r * HIT_FORGIVENESS) hit[j] = true;
+    });
+  }
+  // Both caught by the same frame's blasts: nobody is out, play on.
+  if (hit[0] && hit[1]) {
+    state.events.push({ kind: 'bump', x: ARENA.w / 2, y: ARENA.h / 2, force: 300 });
+    return;
+  }
+  for (const j of [0, 1] as const) {
+    if (!hit[j]) continue;
+    const p = state.players[j];
+    p.alive = false;
+    state.events.push({ kind: 'hit', who: j, x: p.x, y: p.y });
+    endRound(state, j === 0 ? 1 : 0);
+  }
 }
 
 function endRound(state: GameState, winner: Side): void {
@@ -294,32 +448,38 @@ export function step(state: GameState, inputs: [Vec, Vec], dt: number, rng: Rng 
   movePlayer(state.players[1], inputs[1], dt);
   resolveBump(state);
 
-  const suddenWinner = collectCoins(state);
-  if (suddenWinner !== null) {
-    endRound(state, suddenWinner);
+  if (state.mode === 'coins') {
+    collectCoins(state);
+    if (state.coins.length < MAX_COINS) {
+      state.spawnTimer += dt;
+      if (state.spawnTimer >= COIN_RESPAWN) {
+        state.spawnTimer = 0;
+        spawnCoin(state, rng);
+      }
+    } else {
+      state.spawnTimer = 0;
+    }
+  } else if (state.mode === 'paint') {
+    paintCells(state);
+  } else {
+    updateMeteors(state, dt, rng);
+    if (state.phase !== 'playing' && state.phase !== 'sudden') return;
+  }
+
+  const [p0, p1] = state.players;
+  if (state.phase === 'sudden') {
+    // Coins and paint: the first lead ends it. Meteors end on a hit (above).
+    if (state.mode !== 'meteor' && p0.score !== p1.score) endRound(state, p0.score > p1.score ? 0 : 1);
     return;
   }
 
-  if (state.coins.length < MAX_COINS) {
-    state.spawnTimer += dt;
-    if (state.spawnTimer >= COIN_RESPAWN) {
-      state.spawnTimer = 0;
-      spawnCoin(state, rng);
-    }
-  } else {
-    state.spawnTimer = 0;
-  }
-
-  if (state.phase === 'playing') {
-    state.timeLeft = Math.max(0, state.timeLeft - dt);
-    if (state.timeLeft <= 0) {
-      const [p0, p1] = state.players;
-      if (p0.score === p1.score) {
-        state.phase = 'sudden';
-        state.events.push({ kind: 'sudden' });
-      } else {
-        endRound(state, p0.score > p1.score ? 0 : 1);
-      }
+  state.timeLeft = Math.max(0, state.timeLeft - dt);
+  if (state.timeLeft <= 0) {
+    if (state.mode === 'meteor' || p0.score === p1.score) {
+      state.phase = 'sudden';
+      state.events.push({ kind: 'sudden' });
+    } else {
+      endRound(state, p0.score > p1.score ? 0 : 1);
     }
   }
 }

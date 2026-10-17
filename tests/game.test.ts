@@ -4,6 +4,7 @@ import {
   BASE_SPEED,
   COUNTDOWN_TIME,
   createMatch,
+  meteorGap,
   PLAYER_R,
   rematch,
   ROUND_OVER_TIME,
@@ -37,7 +38,7 @@ function skipCountdown(state: GameState) {
 
 describe('round flow', () => {
   it('counts down, then plays', () => {
-    const s = createMatch(0, seeded());
+    const s = createMatch(0, 'coins', seeded());
     expect(s.phase).toBe('countdown');
     run(s, COUNTDOWN_TIME + 0.01);
     expect(s.phase).toBe('playing');
@@ -46,14 +47,14 @@ describe('round flow', () => {
   });
 
   it('freezes players during the countdown', () => {
-    const s = createMatch(0, seeded());
+    const s = createMatch(0, 'coins', seeded());
     const x = s.players[0].x;
     run(s, 1, [{ x: 1, y: 0 }, { x: 0, y: 0 }]);
     expect(s.players[0].x).toBe(x);
   });
 
   it('awards the round to the higher score when time runs out and moves the handicap', () => {
-    const s = createMatch(0, seeded());
+    const s = createMatch(0, 'coins', seeded());
     skipCountdown(s);
     s.players[0].score = 4;
     s.players[1].score = 2;
@@ -66,7 +67,7 @@ describe('round flow', () => {
   });
 
   it('goes to sudden death on a tie, and the next coin wins', () => {
-    const s = createMatch(0, seeded());
+    const s = createMatch(0, 'coins', seeded());
     skipCountdown(s);
     s.coins = [];
     // Keep coins from spawning under anyone by parking players in corners.
@@ -86,7 +87,7 @@ describe('round flow', () => {
   });
 
   it('starts the next round with the new speeds applied', () => {
-    const s = createMatch(0, seeded());
+    const s = createMatch(0, 'coins', seeded());
     skipCountdown(s);
     s.players[0].score = 1;
     s.timeLeft = 0.01;
@@ -102,7 +103,7 @@ describe('round flow', () => {
   });
 
   it('ends the match at the win target, and rematch keeps the handicap', () => {
-    const s = createMatch(0, seeded());
+    const s = createMatch(0, 'coins', seeded());
     for (let r = 0; r < WINS_TO_MATCH; r++) {
       skipCountdown(s);
       s.players[0].score = 1;
@@ -123,7 +124,7 @@ describe('round flow', () => {
 
 describe('movement and coins', () => {
   it('a slowed player covers less ground', () => {
-    const s = createMatch(0.25, seeded());
+    const s = createMatch(0.25, 'coins', seeded());
     skipCountdown(s);
     s.coins = [];
     const start0 = s.players[0].x;
@@ -140,7 +141,7 @@ describe('movement and coins', () => {
   });
 
   it('caps diagonal and oversized stick input at full speed', () => {
-    const s = createMatch(0, seeded());
+    const s = createMatch(0, 'coins', seeded());
     skipCountdown(s);
     s.coins = [];
     run(s, 0.3, [{ x: 5, y: 5 }, { x: 0, y: 0 }]);
@@ -149,14 +150,14 @@ describe('movement and coins', () => {
   });
 
   it('ignores NaN input instead of corrupting positions', () => {
-    const s = createMatch(0, seeded());
+    const s = createMatch(0, 'coins', seeded());
     skipCountdown(s);
     run(s, 0.2, [{ x: NaN, y: NaN }, { x: 0, y: 0 }]);
     expect(Number.isFinite(s.players[0].x)).toBe(true);
   });
 
   it('stays inside the arena walls', () => {
-    const s = createMatch(0, seeded());
+    const s = createMatch(0, 'coins', seeded());
     skipCountdown(s);
     run(s, 4, [{ x: -1, y: -1 }, { x: 1, y: 1 }]);
     expect(s.players[0].x).toBeGreaterThanOrEqual(PLAYER_R);
@@ -166,7 +167,7 @@ describe('movement and coins', () => {
   });
 
   it('collecting a coin scores its value and respawns coins over time', () => {
-    const s = createMatch(0, seeded());
+    const s = createMatch(0, 'coins', seeded());
     skipCountdown(s);
     s.coins = [{ id: 500, x: s.players[0].x, y: s.players[0].y, value: 3 }];
     step(s, still, 1 / 120);
@@ -177,7 +178,7 @@ describe('movement and coins', () => {
   });
 
   it('bumping pushes both players apart and fires one bump event', () => {
-    const s = createMatch(0, seeded());
+    const s = createMatch(0, 'coins', seeded());
     skipCountdown(s);
     s.coins = [];
     s.players[0].x = 480;
@@ -189,5 +190,111 @@ describe('movement and coins', () => {
     expect(s.players[1].kx).toBeGreaterThan(0);
     run(s, 0.5);
     expect(s.players[1].x - s.players[0].x).toBeGreaterThan(PLAYER_R * 2);
+  });
+});
+
+describe('paint the floor', () => {
+  it('paints cells under each player and scores them', () => {
+    const s = createMatch(0, 'paint', seeded());
+    skipCountdown(s);
+    step(s, still, 1 / 120);
+    expect(s.players[0].score).toBeGreaterThan(0);
+    expect(s.players[0].score).toBe(s.players[1].score);
+    const owned = (o: number) => s.grid.filter((c) => c === o).length;
+    expect(owned(1)).toBe(s.players[0].score);
+    run(s, 1, [{ x: 0, y: 1 }, { x: 0, y: 0 }]);
+    expect(s.players[0].score).toBeGreaterThan(s.players[1].score);
+    expect(owned(1)).toBe(s.players[0].score);
+  });
+
+  it('stealing a cell moves the point to the new owner', () => {
+    const s = createMatch(0, 'paint', seeded());
+    skipCountdown(s);
+    step(s, still, 1 / 120);
+    const before1 = s.players[1].score;
+    // Teleport the host onto the guest's painted patch (guest moved away first).
+    s.players[1].x = ARENA.w - PLAYER_R;
+    s.players[1].y = PLAYER_R;
+    const gx = ARENA.w * 0.8;
+    s.players[0].x = gx;
+    s.players[0].y = ARENA.h / 2;
+    step(s, still, 1 / 120);
+    expect(s.grid.filter((c) => c === 2).length).toBe(s.players[1].score);
+    expect(s.players[1].score).toBeLessThan(before1 + 20);
+    expect(s.grid.filter((c) => c === 1).length).toBe(s.players[0].score);
+  });
+
+  it('awards the round to whoever owns more floor at the buzzer', () => {
+    const s = createMatch(0, 'paint', seeded());
+    skipCountdown(s);
+    run(s, ROUND_TIME + 0.1, [{ x: 0, y: 0 }, { x: -1, y: 0.3 }]);
+    expect(s.phase).toBe('roundOver');
+    expect(s.roundWinner).toBe(1);
+  });
+});
+
+describe('meteor dodge', () => {
+  it('uses size, not speed, as the handicap', () => {
+    const s = createMatch(0.08, 'meteor', seeded());
+    expect(s.players[0].speed).toBe(1);
+    expect(s.players[0].r).toBeCloseTo(PLAYER_R * 1.16);
+    expect(s.players[1].r).toBe(PLAYER_R);
+  });
+
+  it('a direct hit knocks a player out and gives the round to the other', () => {
+    const s = createMatch(0, 'meteor', seeded());
+    skipCountdown(s);
+    s.meteors = [{ id: 1, x: s.players[1].x, y: s.players[1].y, t: 0.001 }];
+    s.spawnTimer = -100; // no new meteors during the test
+    step(s, still, 1 / 120);
+    expect(s.players[1].alive).toBe(false);
+    expect(s.phase).toBe('roundOver');
+    expect(s.roundWinner).toBe(0);
+    expect(s.events.some((e) => e.kind === 'hit' && e.who === 1)).toBe(true);
+  });
+
+  it('a near miss outside the blast does nothing', () => {
+    const s = createMatch(0, 'meteor', seeded());
+    skipCountdown(s);
+    s.spawnTimer = -100;
+    s.meteors = [{ id: 1, x: s.players[1].x + 55 + PLAYER_R, y: s.players[1].y, t: 0.001 }];
+    step(s, still, 1 / 120);
+    expect(s.players[1].alive).toBe(true);
+    expect(s.phase).toBe('playing');
+  });
+
+  it('if both are hit at once, nobody is out', () => {
+    const s = createMatch(0, 'meteor', seeded());
+    skipCountdown(s);
+    s.spawnTimer = -100;
+    s.meteors = [
+      { id: 1, x: s.players[0].x, y: s.players[0].y, t: 0.001 },
+      { id: 2, x: s.players[1].x, y: s.players[1].y, t: 0.001 },
+    ];
+    step(s, still, 1 / 120);
+    expect(s.players.every((p) => p.alive)).toBe(true);
+    expect(s.phase).toBe('playing');
+  });
+
+  it('spawns faster over time and turns into a storm after the clock', () => {
+    const s = createMatch(0, 'meteor', seeded());
+    skipCountdown(s);
+    const startGap = meteorGap(s);
+    s.timeLeft = 1;
+    const lateGap = meteorGap(s);
+    expect(lateGap).toBeLessThan(startGap);
+    s.meteors = [];
+    s.spawnTimer = -100;
+    s.timeLeft = 0.005;
+    step(s, still, 1 / 120);
+    expect(s.phase).toBe('sudden');
+    expect(meteorGap(s)).toBeLessThan(lateGap);
+  });
+
+  it('a standing-still player eventually gets hit (meteors aim at players)', () => {
+    const s = createMatch(0, 'meteor', seeded(7));
+    skipCountdown(s);
+    run(s, 40, still, seeded(7));
+    expect(s.roundWins[0] + s.roundWins[1]).toBeGreaterThan(0);
   });
 });

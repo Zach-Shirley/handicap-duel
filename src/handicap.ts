@@ -26,24 +26,47 @@ export function applyRoundResult(h: number, winner: Side): number {
   return h > 0 ? clampHandicap(Math.max(0, h - HANDICAP_STEP)) : h;
 }
 
-export function speedsFor(h: number): [number, number] {
+export function penaltiesFor(h: number): [number, number] {
   const c = clampHandicap(h);
-  return [1 - Math.max(0, c), 1 - Math.max(0, -c)];
+  return [Math.max(0, c), Math.max(0, -c)];
+}
+
+export function speedsFor(h: number): [number, number] {
+  const [a, b] = penaltiesFor(h);
+  return [1 - a, 1 - b];
+}
+
+/** Meteor Dodge handicaps size instead of speed: 8% penalty -> 16% bigger. */
+export function sizesFor(h: number): [number, number] {
+  const [a, b] = penaltiesFor(h);
+  return [1 + 2 * a, 1 + 2 * b];
 }
 
 export function speedPercent(speed: number): number {
   return Math.round(speed * 100);
 }
 
+export type Effect = 'speed' | 'size';
+
 /** Plain-language summary of what a round result did to the handicap. */
-export function describeChange(before: number, after: number, names: [string, string]): string {
-  const [b0, b1] = speedsFor(before);
-  const [a0, a1] = speedsFor(after);
+export function describeChange(before: number, after: number, names: [string, string], effect: Effect = 'speed'): string {
+  const fn = effect === 'size' ? sizesFor : speedsFor;
+  const b = fn(before);
+  const a = fn(after);
   const parts: string[] = [];
-  for (const [i, b, a] of [[0, b0, a0], [1, b1, a1]] as const) {
-    if (a < b) parts.push(`${names[i]} slowed to ${speedPercent(a)}%`);
-    else if (a > b) parts.push(`${names[i]} sped up to ${speedPercent(a)}%`);
+  for (const i of [0, 1] as const) {
+    const pct = speedPercent(a[i]);
+    if (effect === 'speed') {
+      if (a[i] < b[i]) parts.push(`${names[i]} slowed to ${pct}%`);
+      else if (a[i] > b[i]) parts.push(`${names[i]} sped up to ${pct}%`);
+    } else {
+      if (a[i] > b[i]) parts.push(`${names[i]} grew to ${pct}% size`);
+      else if (a[i] < b[i]) parts.push(`${names[i]} shrank to ${pct}% size`);
+    }
   }
-  if (parts.length === 0) return after >= 0 && after === before && before === 0 ? `${names[0]} is already at full speed` : 'No speed change';
+  if (parts.length === 0) {
+    if (before === 0 && after === 0) return effect === 'speed' ? `${names[0]} is already at full speed` : `${names[0]} is already normal size`;
+    return 'No change';
+  }
   return parts.join(' · ');
 }

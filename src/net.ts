@@ -1,5 +1,5 @@
 import Peer, { type DataConnection } from 'peerjs';
-import type { GameEvent, Phase } from './game';
+import type { GameEvent, Mode, Phase } from './game';
 
 /**
  * Networking: the host (computer) runs the authoritative simulation and
@@ -25,12 +25,16 @@ export function normalizeCode(raw: string): string {
 }
 
 export interface Snapshot {
+  mode: Mode;
   phase: Phase;
   phaseTime: number;
   timeLeft: number;
   round: number;
-  players: { x: number; y: number; score: number; speed: number }[];
+  players: { x: number; y: number; score: number; speed: number; r: number; alive: boolean }[];
   coins: { id: number; x: number; y: number; value: number }[];
+  /** Paint grid as a string of '0' / '1' / '2', row-major. Empty outside paint mode. */
+  grid: string;
+  meteors: { id: number; x: number; y: number; t: number }[];
   roundWins: [number, number];
   roundWinner: 0 | 1 | null;
   handicap: number;
@@ -39,7 +43,7 @@ export interface Snapshot {
 
 export type HostMsg =
   | { t: 'welcome'; hostName: string; guestName: string }
-  | { t: 'lobby'; hostName: string; guestName: string; handicap: number }
+  | { t: 'lobby'; hostName: string; guestName: string; handicap: number; mode: Mode }
   | { t: 'state'; s: Snapshot; ev: GameEvent[] }
   | { t: 'toLobby' }
   | { t: 'full' };

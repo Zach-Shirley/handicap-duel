@@ -1,25 +1,33 @@
 # Handicap Duel
 
-A two-player coin grab built so a younger sibling can actually beat an older one. One player is on a computer and the other on a phone. Rounds are 30 seconds long, and whoever grabs more coins wins the round. Each time the computer player wins a round, they get 8% slower. Each time the phone player wins, the computer player gets that speed back. Over a few matches the game settles where the weaker player wins about half the time.
+A two-player arena game built so a younger sibling can actually beat an older one. One player is on a computer and the other on a phone, and every round the computer player wins handicaps them a bit more. Each round the phone player wins takes some of that handicap back. Over a few matches the game settles where the weaker player wins about half the time.
+
+Three games, picked in the lobby:
+
+| Game | Goal | Handicap |
+|---|---|---|
+| **Coin Rush** | Grab the most coins in 30 seconds. Big orange coins are worth 3. | 8% slower per win |
+| **Paint the Floor** | Your dot paints the floor tiles it touches. Own more floor after 30 seconds. You can paint over the other player's tiles. | 8% slower per win |
+| **Meteor Dodge** | Meteors land where the warning circles are. One hit and you're out. If you both survive 30 seconds, a meteor storm starts. | 16% bigger per win |
 
 ## How to play
 
 1. On the computer, open the site, enter a name and click **Host a game**.
 2. On the phone, scan the QR code, or open the site and type the 5-character room code.
-3. Click **Start match** on the computer. First to 5 round wins takes the match.
+3. Pick a game, then click **Start match** on the computer. First to 5 round wins takes the match.
 
 - Computer: WASD or arrow keys.
 - Phone: put a thumb anywhere and drag. The stick follows your thumb.
 - Bumping into the other player knocks you both back.
-- Big orange coins are worth 3.
-- A tied round goes to sudden death, where the next coin wins.
+- A tied round goes to sudden death: the next coin or tile wins.
+- In Meteor Dodge, about half the meteors aim at where a player is standing, alternating between the two players. If both players are hit in the same instant, nobody is out.
 - The lobby has manual "starting speed" buttons. The current handicap is saved in the computer's browser and carries over between matches.
 - **Practice on one keyboard** runs both players locally (WASD versus arrows) with no network.
 
 ## How it works
 
-- **Simulation** (`src/game.ts`): fixed-step, pure TypeScript with an injectable random source. The host's browser is the only authority.
-- **Handicap** (`src/handicap.ts`): one signed number. Positive slows the host and negative slows the guest. A negative value only comes from the manual lobby setting.
+- **Simulation** (`src/game.ts`): fixed-step, pure TypeScript with an injectable random source. The host's browser is the only authority. All three games share movement, bumps and the round, match and sudden-death flow.
+- **Handicap** (`src/handicap.ts`): one signed number that becomes speed in Coin Rush and Paint, and size in Meteor Dodge. Positive handicaps the host and negative handicaps the guest. A negative value only comes from the manual lobby setting.
 - **Networking** (`src/net.ts`): the browsers connect peer-to-peer over WebRTC using [PeerJS](https://peerjs.com/). PeerJS's free public broker is used only to match the room code; game traffic then goes directly between the devices, or through PeerJS's public TURN relay if a direct path fails. The phone sends stick input about 30 times a second. The computer sends back snapshots about 30 times a second, and the phone renders them about 50 ms behind, interpolating player positions.
 - **Rendering** (`src/render.ts`): Canvas 2D with particles and screen shake. Sound effects are procedural Web Audio; there are no audio files.
 
@@ -28,7 +36,7 @@ A two-player coin grab built so a younger sibling can actually beat an older one
 ```bash
 npm install
 npm run dev        # http://127.0.0.1:5370
-npm test           # vitest: round flow, sudden death, handicap rules, movement, bumps
+npm test           # vitest: round flow, sudden death, handicap rules, movement, bumps, paint, meteors
 npm run build
 ```
 

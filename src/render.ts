@@ -1,4 +1,4 @@
-import { ARENA, BIG_COIN_R, COIN_R, PLAYER_R, WINS_TO_MATCH, type GameEvent } from './game';
+import { ARENA, BIG_COIN_R, BLAST_R, CELL, COIN_R, GRID_N, GRID_W, METEOR_WARN, MODE_INFO, PLAYER_R, WINS_TO_MATCH, type GameEvent } from './game';
 import { describeChange, speedPercent } from './handicap';
 import type { Snapshot } from './net';
 import type { TouchStick } from './input';
@@ -98,6 +98,39 @@ export class Renderer {
           });
         }
         this.texts.push({ x: e.x, y: e.y - 10, text: `+${e.value}`, color, life: 0.9 });
+      } else if (e.kind === 'boom') {
+        for (let i = 0; i < 18; i++) {
+          const a = Math.random() * Math.PI * 2;
+          const sp = 60 + Math.random() * 260;
+          this.particles.push({
+            x: e.x,
+            y: e.y,
+            vx: Math.cos(a) * sp,
+            vy: Math.sin(a) * sp,
+            life: 0.5,
+            max: 0.5,
+            color: i % 3 ? '#ff8a3d' : '#ffd34d',
+            size: 3 + Math.random() * 4,
+          });
+        }
+        this.rings.push({ x: e.x, y: e.y, life: 0.35 });
+        this.shake = Math.max(this.shake, 5);
+      } else if (e.kind === 'hit') {
+        for (let i = 0; i < 40; i++) {
+          const a = Math.random() * Math.PI * 2;
+          const sp = 100 + Math.random() * 400;
+          this.particles.push({
+            x: e.x,
+            y: e.y,
+            vx: Math.cos(a) * sp,
+            vy: Math.sin(a) * sp,
+            life: 0.9,
+            max: 0.9,
+            color: i % 2 ? COLORS[e.who] : '#ffffff',
+            size: 4 + Math.random() * 4,
+          });
+        }
+        this.shake = 16;
       } else if (e.kind === 'bump') {
         this.rings.push({ x: e.x, y: e.y, life: 0.35 });
         this.shake = Math.min(14, 4 + e.force / 60);
@@ -127,8 +160,11 @@ export class Renderer {
     ctx.save();
     ctx.translate(0, HUD_H);
     this.drawArena();
+    if (view.snap.mode === 'paint') this.drawGrid(view.snap.grid);
     this.drawCoins(view.snap);
+    if (view.snap.mode === 'meteor') this.drawMeteorWarnings(view.snap);
     this.drawPlayers(view);
+    if (view.snap.mode === 'meteor') this.drawMeteorRocks(view.snap);
     this.drawEffects(dt);
     if (!view.idle) this.drawBanner(view);
     ctx.restore();
@@ -171,6 +207,68 @@ export class Renderer {
     ctx.shadowBlur = 0;
   }
 
+  private drawGrid(grid: string) {
+    const { ctx } = this;
+    const fills = ['', 'rgba(255,77,109,0.55)', 'rgba(56,214,255,0.55)'];
+    for (let k = 0; k < grid.length; k++) {
+      const o = grid.charCodeAt(k) - 48;
+      if (o !== 1 && o !== 2) continue;
+      const x = (k % GRID_W) * CELL;
+      const y = Math.floor(k / GRID_W) * CELL;
+      ctx.fillStyle = fills[o];
+      ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
+    }
+  }
+
+  private drawMeteorWarnings(s: Snapshot) {
+    const { ctx } = this;
+    for (const m of s.meteors) {
+      const k = Math.max(0, Math.min(1, 1 - m.t / METEOR_WARN)); // 0 -> 1 as impact nears
+      ctx.fillStyle = `rgba(255,70,40,${0.08 + k * 0.22})`;
+      ctx.beginPath();
+      ctx.arc(m.x, m.y, BLAST_R, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = `rgba(255,110,60,${0.5 + k * 0.5})`;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      // Closing ring: the meteor lands when it shrinks to the danger zone's edge.
+      ctx.strokeStyle = 'rgba(255,220,120,0.9)';
+      ctx.lineWidth = 3;
+      ctx.globalAlpha = k;
+      ctx.beginPath();
+      ctx.arc(m.x, m.y, BLAST_R * (2 - k), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  private drawMeteorRocks(s: Snapshot) {
+    const { ctx } = this;
+    for (const m of s.meteors) {
+      // Falls in from the upper right over the warning time.
+      const k = Math.max(0, m.t / METEOR_WARN);
+      const x = m.x + k * 260;
+      const y = m.y - k * 520;
+      const g = ctx.createLinearGradient(x, y, x + 60, y - 120);
+      g.addColorStop(0, 'rgba(255,170,80,0.7)');
+      g.addColorStop(1, 'rgba(255,170,80,0)');
+      ctx.strokeStyle = g;
+      ctx.lineWidth = 10;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + 60, y - 120);
+      ctx.stroke();
+      ctx.fillStyle = '#ffb36b';
+      ctx.shadowColor = '#ff7a2f';
+      ctx.shadowBlur = 20;
+      ctx.beginPath();
+      ctx.arc(x, y, 11, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+  }
+
   private drawCoins(s: Snapshot) {
     const { ctx } = this;
     for (const c of s.coins) {
@@ -204,13 +302,15 @@ export class Renderer {
     const { ctx } = this;
     view.snap.players.forEach((p, i) => {
       const color = COLORS[i];
+      const R = p.r;
       ctx.save();
       ctx.translate(p.x, p.y);
+      if (!p.alive) ctx.globalAlpha = 0.3;
       ctx.shadowColor = color;
       ctx.shadowBlur = 24;
       ctx.fillStyle = color;
       ctx.beginPath();
-      ctx.arc(0, 0, PLAYER_R, 0, Math.PI * 2);
+      ctx.arc(0, 0, R, 0, Math.PI * 2);
       ctx.fill();
       ctx.shadowBlur = 0;
       // Speed ring: the gap shows how much of full speed is missing.
@@ -218,13 +318,24 @@ export class Renderer {
         ctx.strokeStyle = 'rgba(255,255,255,0.85)';
         ctx.lineWidth = 3;
         ctx.beginPath();
-        ctx.arc(0, 0, PLAYER_R + 6, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * p.speed);
+        ctx.arc(0, 0, R + 6, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * p.speed);
         ctx.stroke();
       }
       ctx.fillStyle = 'rgba(0,0,0,0.25)';
       ctx.beginPath();
-      ctx.arc(0, 0, PLAYER_R * 0.45, 0, Math.PI * 2);
+      ctx.arc(0, 0, R * 0.45, 0, Math.PI * 2);
       ctx.fill();
+      if (!p.alive) {
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.moveTo(-R * 0.5, -R * 0.5);
+        ctx.lineTo(R * 0.5, R * 0.5);
+        ctx.moveTo(R * 0.5, -R * 0.5);
+        ctx.lineTo(-R * 0.5, R * 0.5);
+        ctx.stroke();
+      }
       ctx.fillStyle = '#fff';
       ctx.font = '600 17px "Fredoka", system-ui, sans-serif';
       ctx.textAlign = 'center';
@@ -232,12 +343,12 @@ export class Renderer {
       const label = view.me === i ? `${view.names[i]} (you)` : view.names[i];
       // When the dots are touching, put the guest's label underneath.
       const o = view.snap.players[1 - i];
-      const close = Math.abs(o.x - p.x) < 130 && Math.abs(o.y - p.y) < 70;
+      const close = Math.abs(o.x - p.x) < 130 && Math.abs(o.y - p.y) < 70 + R;
       if (i === 1 && close) {
         ctx.textBaseline = 'top';
-        ctx.fillText(label, 0, PLAYER_R + 10);
+        ctx.fillText(label, 0, R + 10);
       } else {
-        ctx.fillText(label, 0, -PLAYER_R - 10);
+        ctx.fillText(label, 0, -R - 10);
       }
       ctx.restore();
     });
@@ -288,7 +399,15 @@ export class Renderer {
       ctx.textAlign = left ? 'left' : 'right';
       ctx.fillStyle = COLORS[i];
       ctx.font = '700 40px "Fredoka", system-ui, sans-serif';
-      const scoreText = String(p.score);
+      const mode = s.mode;
+      const scoreText =
+        mode === 'paint'
+          ? `${Math.round((p.score / GRID_N) * 100)}%`
+          : mode === 'meteor'
+            ? p.alive
+              ? '\u2665'
+              : '\u2715'
+            : String(p.score);
       ctx.fillText(scoreText, x, 28);
       const sw = ctx.measureText(scoreText).width;
       ctx.font = '600 18px "Fredoka", system-ui, sans-serif';
@@ -296,8 +415,11 @@ export class Renderer {
       const nx = left ? x + sw + 14 : x - sw - 14;
       ctx.fillText(view.names[i], nx, 18);
       ctx.font = '500 14px "Fredoka", system-ui, sans-serif';
-      ctx.fillStyle = p.speed < 0.999 ? '#ffd34d' : 'rgba(232,230,255,0.55)';
-      ctx.fillText(`speed ${speedPercent(p.speed)}%`, nx, 40);
+      const sizeMul = p.r / PLAYER_R;
+      const meteorMode = mode === 'meteor';
+      const handicapped = meteorMode ? sizeMul > 1.001 : p.speed < 0.999;
+      ctx.fillStyle = handicapped ? '#ffd34d' : 'rgba(232,230,255,0.55)';
+      ctx.fillText(meteorMode ? `size ${speedPercent(sizeMul)}%` : `speed ${speedPercent(p.speed)}%`, nx, 40);
       // Round-win pips
       for (let k = 0; k < WINS_TO_MATCH; k++) {
         const px = left ? 14 + k * 20 : WORLD_W - 14 - k * 20;
@@ -317,10 +439,11 @@ export class Renderer {
     const sudden = s.phase === 'sudden';
     ctx.fillStyle = sudden ? '#ff4d6d' : s.timeLeft <= 5 && s.phase === 'playing' ? '#ffd34d' : '#fff';
     ctx.font = '700 38px "Fredoka", system-ui, sans-serif';
-    ctx.fillText(sudden ? 'SUDDEN DEATH' : String(Math.ceil(s.timeLeft)), WORLD_W / 2, 28);
+    const info = MODE_INFO[s.mode];
+    ctx.fillText(sudden ? info.sudden : String(Math.ceil(s.timeLeft)), WORLD_W / 2, 28);
     ctx.font = '500 14px "Fredoka", system-ui, sans-serif';
     ctx.fillStyle = 'rgba(232,230,255,0.55)';
-    ctx.fillText(sudden ? 'next coin wins' : `round ${s.round} · first to ${WINS_TO_MATCH}`, WORLD_W / 2, 58);
+    ctx.fillText(sudden ? info.suddenSub : `${info.name} · round ${s.round} · first to ${WINS_TO_MATCH}`, WORLD_W / 2, 58);
   }
 
   private drawBanner(view: View) {
@@ -331,15 +454,15 @@ export class Renderer {
     let color = '#fff';
     if (s.phase === 'countdown') {
       big = String(Math.max(1, Math.ceil(s.phaseTime)));
-      small = s.round === 1 ? 'Grab the most coins in 30 seconds' : '';
+      small = s.round === 1 ? MODE_INFO[s.mode].blurb : '';
     } else if (s.phase === 'roundOver' && s.roundWinner !== null) {
       big = `${view.names[s.roundWinner]} wins the round`;
       color = COLORS[s.roundWinner];
-      small = describeChange(s.handicapBefore, s.handicap, view.names);
+      small = describeChange(s.handicapBefore, s.handicap, view.names, MODE_INFO[s.mode].effect);
     } else if (s.phase === 'matchOver' && s.roundWinner !== null) {
       big = `${view.names[s.roundWinner]} wins the match!`;
       color = COLORS[s.roundWinner];
-      small = describeChange(s.handicapBefore, s.handicap, view.names);
+      small = describeChange(s.handicapBefore, s.handicap, view.names, MODE_INFO[s.mode].effect);
     }
     if (!big) return;
     ctx.fillStyle = 'rgba(7,7,13,0.55)';
