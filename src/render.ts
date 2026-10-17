@@ -1,5 +1,5 @@
-import { ARENA, BIG_COIN_R, BLAST_R, CELL, COIN_R, GRID_N, GRID_W, METEOR_WARN, MODE_INFO, PLAYER_R, WINS_TO_MATCH, type GameEvent } from './game';
-import { describeChange, speedPercent } from './handicap';
+import { ARENA, BIG_COIN_R, BLAST_R, CELL, COIN_R, GRID_N, GRID_W, METEOR_WARN, MODE_INFO, WINS_TO_MATCH, type GameEvent } from './game';
+import { describeChange, pct } from './handicap';
 import type { Snapshot } from './net';
 import type { TouchStick } from './input';
 
@@ -415,11 +415,15 @@ export class Renderer {
       const nx = left ? x + sw + 14 : x - sw - 14;
       ctx.fillText(view.names[i], nx, 18);
       ctx.font = '500 14px "Fredoka", system-ui, sans-serif';
-      const sizeMul = p.r / PLAYER_R;
-      const meteorMode = mode === 'meteor';
-      const handicapped = meteorMode ? sizeMul > 1.001 : p.speed < 0.999;
-      ctx.fillStyle = handicapped ? '#ffd34d' : 'rgba(232,230,255,0.55)';
-      ctx.fillText(meteorMode ? `size ${speedPercent(sizeMul)}%` : `speed ${speedPercent(p.speed)}%`, nx, 40);
+      // Show the stat this game adjusts, plus the other one whenever it isn't normal.
+      const sp = s.handicap.speed[i];
+      const sz = s.handicap.size[i];
+      const effect = MODE_INFO[mode].effect;
+      const stats: string[] = [];
+      if (effect === 'speed' || sp !== 1) stats.push(`speed ${pct(sp)}%`);
+      if (effect === 'size' || sz !== 1) stats.push(`size ${pct(sz)}%`);
+      ctx.fillStyle = sp < 1 || sz > 1 ? '#ffd34d' : 'rgba(232,230,255,0.55)';
+      ctx.fillText(stats.join(' · '), nx, 40);
       // Round-win pips
       for (let k = 0; k < WINS_TO_MATCH; k++) {
         const px = left ? 14 + k * 20 : WORLD_W - 14 - k * 20;
@@ -458,11 +462,11 @@ export class Renderer {
     } else if (s.phase === 'roundOver' && s.roundWinner !== null) {
       big = `${view.names[s.roundWinner]} wins the round`;
       color = COLORS[s.roundWinner];
-      small = describeChange(s.handicapBefore, s.handicap, view.names, MODE_INFO[s.mode].effect);
+      small = describeChange(s.handicapBefore, s.handicap, view.names);
     } else if (s.phase === 'matchOver' && s.roundWinner !== null) {
       big = `${view.names[s.roundWinner]} wins the match!`;
       color = COLORS[s.roundWinner];
-      small = describeChange(s.handicapBefore, s.handicap, view.names, MODE_INFO[s.mode].effect);
+      small = describeChange(s.handicapBefore, s.handicap, view.names);
     }
     if (!big) return;
     ctx.fillStyle = 'rgba(7,7,13,0.55)';

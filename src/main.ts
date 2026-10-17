@@ -1,7 +1,7 @@
 import './style.css';
 import QRCode from 'qrcode';
 import { createMatch, MODE_INFO, MODES, rematch, step, type GameEvent, type GameState, type Mode, type Vec } from './game';
-import { clampHandicap, HANDICAP_MAX, HANDICAP_STEP, sizesFor, speedPercent, speedsFor } from './handicap';
+import { cloneHc, fromLegacy, MANUAL_SIZE_MIN, MANUAL_SPEED_MAX, MANUAL_SPEED_MIN, neutral, nudge, pct, sanitize, type Effect, type Handicaps, type Side } from './handicap';
 import { bindKeyboard, readKeys, TouchStick } from './input';
 import { GuestLink, HostLink, normalizeCode, type HostMsg, type Snapshot } from './net';
 import { Renderer } from './render';
@@ -40,7 +40,21 @@ function save(key: string, value: string) {
   }
 }
 let myName = load('hd.name', '');
-let savedHandicap = clampHandicap(Number(load('hd.handicap', '0')) || 0);
+function loadHandicaps(): Handicaps {
+  const raw = load('hd.hc', '');
+  if (raw) {
+    try {
+      return sanitize(JSON.parse(raw));
+    } catch {
+      return neutral();
+    }
+  }
+  return fromLegacy(Number(load('hd.handicap', '0')) || 0);
+}
+let savedHc = loadHandicaps();
+function saveHc() {
+  save('hd.hc', JSON.stringify(savedHc));
+}
 const storedMode = load('hd.mode', 'coins') as Mode;
 let savedMode: Mode = MODES.includes(storedMode) ? storedMode : 'coins';
 
@@ -59,7 +73,7 @@ let lobbyStatus = '';
 
 // Guest-side snapshot buffer for smooth interpolation.
 let snaps: { at: number; s: Snapshot }[] = [];
-let guestHandicap = 0;
+let guestHc = neutral();
 let guestMode: Mode = 'coins';
 let wakeLock: { release(): Promise<void> } | null = null;
 
@@ -110,8 +124,8 @@ function snapOf(s: GameState): Snapshot {
     meteors: s.meteors.map((m) => ({ id: m.id, x: r(m.x), y: r(m.y), t: Math.round(m.t * 100) / 100 })),
     roundWins: [...s.roundWins] as [number, number],
     roundWinner: s.roundWinner,
-    handicap: s.handicap,
-    handicapBefore: s.handicapBefore,
+    handicap: cloneHc(s.handicap),
+    handicapBefore: cloneHc(s.handicapBefore),
   };
 }
 
@@ -250,14 +264,31 @@ async function startHosting() {
 }
 
 function sendLobby() {
-  host?.send({ t: 'lobby', hostName: names[0], guestName: names[1], handicap: savedHandicap, mode: savedMode });
+  host?.send({ t: 'lobby', hostName: names[0], guestName: names[1], handicap: savedHc, mode: savedMode });
 }
 
-function speedLine(h: number, n: [string, string], m: Mode): string {
-  const size = MODE_INFO[m].effect === 'size';
-  const [a, b] = size ? sizesFor(h) : speedsFor(h);
-  const word = size ? 'size' : 'speed';
-  return `<span style="color:var(--p1)">${esc(n[0])} ${word} ${speedPercent(a)}%</span> · <span style="color:var(--p2)">${esc(n[1])} ${word} ${speedPercent(b)}%</span>`;
+function statLine(h: Handicaps, n: [string, string]): string {
+  const one = (i: Side) =>
+    `<span style="color:var(--p${i + 1})">${esc(n[i])}: speed ${pct(h.speed[i])}% · size ${pct(h.size[i])}%</span>`;
+  return `${one(0)}<br>${one(1)}`;
+}
+
+/** Host-only table: speed and size for both players, each with -/+ buttons. */
+function handicapTable(h: Handicaps, n: [string, string]): string {
+  const cell = (i: Side, e: Effect) => {
+    const v = e === 'speed' ? h.speed[i] : h.size[i];
+    const off = e === 'speed' ? v < 1 : v > 1;
+    const boost = e === 'speed' ? v > 1 : v < 1;
+    const lowDisabled = e === 'speed' ? v <= MANUAL_SPEED_MIN : v <= MANUAL_SIZE_MIN;
+    const highDisabled = e === 'speed' && v >= MANUAL_SPEED_MAX;
+    return `<td><div class="stepper">
+      <button data-who="${i}" data-e="${e}" data-d="-1" ${lowDisabled ? 'disabled' : ''} aria-label="Less ${e}">−</button>
+      <span class="${off ? 'off' : boost ? 'boost' : ''}">${pct(v)}%</span>
+      <button data-who="${i}" data-e="${e}" data-d="1" ${highDisabled ? 'disabled' : ''} aria-label="More ${e}">+</button>
+    </div></td>`;
+  };
+  const row = (i: Side) => `<tr><th style="color:var(--p${i + 1})">${esc(n[i])}</th>${cell(i, 'speed')}${cell(i, 'size')}</tr>`;
+  return `<table class="htable"><thead><tr><th></th><th>Speed</th><th>Size</th></tr></thead><tbody>${row(0)}${row(1)}</tbody></table>`;
 }
 
 /** Game picker; calls onPick when a different game is chosen. */
@@ -297,14 +328,9 @@ function renderLobby() {
       <div class="lobby">
         <div class="lobbyinfo">
           <div class="hcap">
-            <p class="label">Handicap</p>
-            <p>${speedLine(savedHandicap, names, savedMode)}</p>
-            <div class="hbtns">
-              <button id="h-me">Handicap ${esc(names[0])}</button>
-              <button id="h-reset">Even</button>
-              <button id="h-them">Handicap ${esc(names[1])}</button>
-            </div>
-            <p class="hint">Each round the computer player wins makes them ${MODE_INFO[savedMode].effect === 'size' ? 'bigger' : 'slower'}. Carries over between matches and games on this computer.</p>
+            <div class="hhead"><p class="label">Handicap</p><button id="h-reset" class="small">Reset all</button></div>
+            ${handicapTable(savedHc, names)}
+            <p class="hint">In ${MODE_INFO[savedMode].name}, each round the computer player wins makes them ${MODE_INFO[savedMode].effect === 'size' ? 'bigger' : 'slower'}, with no limit. Speed and size both apply in every game. Bigger helps in Coin Rush and Paint. Saved on this computer.</p>
           </div>
           <button class="primary" id="start" ${ready ? '' : 'disabled'}>${ready ? 'Start match' : 'Waiting for player 2…'}</button>
           <p class="hint">You: WASD or arrow keys. Phone: drag a thumb anywhere.</p>
@@ -316,27 +342,28 @@ function renderLobby() {
     margin: 1,
     color: { dark: '#07070d', light: '#ffffff' },
   });
-  const adjust = (d: number) => {
-    savedHandicap = clampHandicap(savedHandicap + d);
-    save('hd.handicap', String(savedHandicap));
+  const commit = (h: Handicaps) => {
+    savedHc = h;
+    saveHc();
     sendLobby();
     renderLobby();
   };
+  overlay.querySelectorAll<HTMLButtonElement>('.stepper button').forEach((b) =>
+    b.addEventListener('click', () =>
+      commit(nudge(savedHc, Number(b.dataset.who) as Side, b.dataset.e as Effect, Number(b.dataset.d) as 1 | -1)),
+    ),
+  );
   bindModePicker((m) => {
     savedMode = m;
     save('hd.mode', m);
     sendLobby();
     renderLobby();
   });
-  document.getElementById('h-me')!.addEventListener('click', () => adjust(HANDICAP_STEP));
-  document.getElementById('h-them')!.addEventListener('click', () => adjust(-HANDICAP_STEP));
-  document.getElementById('h-reset')!.addEventListener('click', () => adjust(-savedHandicap));
-  (document.getElementById('h-me') as HTMLButtonElement).disabled = savedHandicap >= HANDICAP_MAX;
-  (document.getElementById('h-them') as HTMLButtonElement).disabled = savedHandicap <= -HANDICAP_MAX;
+  document.getElementById('h-reset')!.addEventListener('click', () => commit(neutral()));
   document.getElementById('start')!.addEventListener('click', () => {
     if (!host?.connected) return;
     unlockAudio();
-    state = createMatch(savedHandicap, savedMode);
+    state = createMatch(savedHc, savedMode);
     pendingNetEvents = [];
     mode = 'host';
     show('');
@@ -410,7 +437,7 @@ function guestWaitScreen(text: string) {
     <div class="panel">
       <h2>${esc(text)}</h2>
       <p class="label">${esc(MODE_INFO[guestMode].name)}</p>
-      <p>${speedLine(guestHandicap, names, guestMode)}</p>
+      <p>${statLine(guestHc, names)}</p>
       <p class="hint">Drag your thumb anywhere on the screen to move.</p>
       ${portrait ? '<p class="warn">Turn your phone sideways for a bigger arena.</p>' : ''}
       <button id="fs">Go fullscreen</button>
@@ -424,7 +451,7 @@ function onHostMsg(m: HostMsg) {
     case 'lobby':
       names = [m.hostName, m.guestName];
       if (m.t === 'lobby') {
-        guestHandicap = m.handicap;
+        guestHc = sanitize(m.handicap);
         guestMode = m.mode;
       }
       if (mode === 'guestWait') guestWaitScreen('Connected! Waiting for the host to start…');
@@ -474,7 +501,7 @@ function startPractice() {
     save('hd.mode', m);
     mode = 'practice';
     names = ['WASD', 'Arrows'];
-    state = createMatch(0, m);
+    state = createMatch(neutral(), m);
     show('');
   });
   document.getElementById('back')!.addEventListener('click', () => leave());
@@ -571,8 +598,8 @@ function tick(now: number) {
       playSounds(events, mode === 'host' ? 0 : null);
       pendingNetEvents.push(...events);
       if (mode === 'host' && events.some((e) => e.kind === 'round' || e.kind === 'match')) {
-        savedHandicap = state.handicap;
-        save('hd.handicap', String(savedHandicap));
+        savedHc = cloneHc(state.handicap);
+        saveHc();
       }
     }
     if (mode === 'host' && host && now - lastSend >= 33) {
@@ -636,8 +663,8 @@ function idleSnap(now: number): Snapshot {
     meteors: [],
     roundWins: [0, 0],
     roundWinner: null,
-    handicap: 0,
-    handicapBefore: 0,
+    handicap: neutral(),
+    handicapBefore: neutral(),
   };
 }
 

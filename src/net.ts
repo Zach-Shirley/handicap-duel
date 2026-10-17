@@ -1,5 +1,6 @@
 import Peer, { type DataConnection } from 'peerjs';
 import type { GameEvent, Mode, Phase } from './game';
+import type { Handicaps } from './handicap';
 
 /**
  * Networking: the host (computer) runs the authoritative simulation and
@@ -37,13 +38,13 @@ export interface Snapshot {
   meteors: { id: number; x: number; y: number; t: number }[];
   roundWins: [number, number];
   roundWinner: 0 | 1 | null;
-  handicap: number;
-  handicapBefore: number;
+  handicap: Handicaps;
+  handicapBefore: Handicaps;
 }
 
 export type HostMsg =
   | { t: 'welcome'; hostName: string; guestName: string }
-  | { t: 'lobby'; hostName: string; guestName: string; handicap: number; mode: Mode }
+  | { t: 'lobby'; hostName: string; guestName: string; handicap: Handicaps; mode: Mode }
   | { t: 'state'; s: Snapshot; ev: GameEvent[] }
   | { t: 'toLobby' }
   | { t: 'full' };

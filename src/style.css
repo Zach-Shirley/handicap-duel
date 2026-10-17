@@ -141,6 +141,17 @@ button.mode { display: flex; flex-direction: column; gap: 4px; text-align: left;
 button.mode b { font-size: 17px; }
 button.mode small { font-size: 13px; font-weight: 400; color: var(--muted); line-height: 1.3; }
 button.mode.on { border-color: var(--gold); background: rgba(255, 211, 77, 0.12); box-shadow: 0 0 0 1px var(--gold) inset; }
+.hhead { display: flex; align-items: center; justify-content: space-between; }
+button.small { font-size: 13px; padding: 6px 10px; }
+.htable { width: 100%; border-collapse: collapse; margin: 6px 0; }
+.htable th { font-size: 13px; font-weight: 600; color: var(--muted); text-align: center; padding: 4px; }
+.htable tbody th { text-align: left; font-size: 16px; }
+.htable td { padding: 4px; }
+.stepper { display: flex; align-items: center; justify-content: center; gap: 8px; }
+.stepper button { width: 34px; height: 34px; padding: 0; font-size: 20px; line-height: 1; border-radius: 10px; }
+.stepper span { min-width: 56px; text-align: center; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stepper span.off { color: var(--gold); }
+.stepper span.boost { color: #6dff9b; }
 #corner { position: fixed; top: 10px; right: 10px; display: flex; flex-direction: column; gap: 6px; z-index: 5; }
 #corner.hidden { display: none; }
 #corner button { width: 40px; height: 40px; padding: 0; font-size: 18px; border-radius: 12px; background: rgba(20, 18, 38, 0.7); }

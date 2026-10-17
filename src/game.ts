@@ -1,4 +1,4 @@
-import { applyRoundResult, sizesFor, speedsFor, type Effect, type Side } from './handicap';
+import { applyRoundResult, cloneHc, type Effect, type Handicaps, type Side } from './handicap';
 
 export const ARENA = { w: 1000, h: 625 };
 export const PLAYER_R = 24;
@@ -14,6 +14,8 @@ export const MAX_COINS = 3;
 export const COIN_RESPAWN = 0.6;
 export const BIG_COIN_CHANCE = 0.12;
 export const BUMP_COOLDOWN = 0.25;
+/** Size is unlimited in principle; physically a dot can't outgrow the arena. */
+export const MAX_R = ARENA.h / 2 - 2;
 
 // Paint the Floor
 export const CELL = 25;
@@ -122,8 +124,8 @@ export interface GameState {
   meteors: Meteor[];
   roundWins: [number, number];
   roundWinner: Side | null;
-  handicap: number;
-  handicapBefore: number;
+  handicap: Handicaps;
+  handicapBefore: Handicaps;
   events: GameEvent[];
 }
 
@@ -131,7 +133,7 @@ function makePlayer(x: number, y: number, speed: number, r: number): Player {
   return { x, y, vx: 0, vy: 0, kx: 0, ky: 0, score: 0, speed, r, alive: true };
 }
 
-export function createMatch(handicap: number, mode: Mode = 'coins', rng: Rng = Math.random): GameState {
+export function createMatch(handicap: Handicaps, mode: Mode = 'coins', rng: Rng = Math.random): GameState {
   const state: GameState = {
     mode,
     phase: 'countdown',
@@ -147,8 +149,8 @@ export function createMatch(handicap: number, mode: Mode = 'coins', rng: Rng = M
     meteors: [],
     roundWins: [0, 0],
     roundWinner: null,
-    handicap,
-    handicapBefore: handicap,
+    handicap: cloneHc(handicap),
+    handicapBefore: cloneHc(handicap),
     events: [],
   };
   startRound(state, rng);
@@ -156,12 +158,12 @@ export function createMatch(handicap: number, mode: Mode = 'coins', rng: Rng = M
 }
 
 export function startRound(state: GameState, rng: Rng = Math.random): void {
-  const meteor = state.mode === 'meteor';
-  const speeds = meteor ? [1, 1] : speedsFor(state.handicap);
-  const sizes = meteor ? sizesFor(state.handicap) : [1, 1];
+  const { speed, size } = state.handicap;
+  const r0 = Math.min(MAX_R, PLAYER_R * size[0]);
+  const r1 = Math.min(MAX_R, PLAYER_R * size[1]);
   state.players = [
-    makePlayer(ARENA.w * 0.2, ARENA.h / 2, speeds[0], PLAYER_R * sizes[0]),
-    makePlayer(ARENA.w * 0.8, ARENA.h / 2, speeds[1], PLAYER_R * sizes[1]),
+    makePlayer(Math.max(r0, ARENA.w * 0.2), ARENA.h / 2, speed[0], r0),
+    makePlayer(Math.min(ARENA.w - r1, ARENA.w * 0.8), ARENA.h / 2, speed[1], r1),
   ];
   state.coins = [];
   state.meteors = [];
@@ -403,8 +405,8 @@ function updateMeteors(state: GameState, dt: number, rng: Rng): void {
 function endRound(state: GameState, winner: Side): void {
   state.roundWinner = winner;
   state.roundWins[winner] += 1;
-  state.handicapBefore = state.handicap;
-  state.handicap = applyRoundResult(state.handicap, winner);
+  state.handicapBefore = cloneHc(state.handicap);
+  state.handicap = applyRoundResult(state.handicap, winner, MODE_INFO[state.mode].effect);
   if (state.roundWins[winner] >= WINS_TO_MATCH) {
     state.phase = 'matchOver';
     state.phaseTime = 0;
